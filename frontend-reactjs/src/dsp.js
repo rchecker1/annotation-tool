@@ -71,24 +71,14 @@ export function fft(re, im) {
 function hzToMel(hz) { return 2595 * Math.log10(1 + hz / 700); }
 function melToHz(mel) { return 700 * (10 ** (mel / 2595) - 1); }
 
-export function buildMelSpectrogram(audioBuffer, colormapFn = inferno) {
-  const sr = audioBuffer.sampleRate;
-  const ch = audioBuffer.getChannelData(0);
-  const N_FFT = 2048, HOP = 512;
-  const frames = Math.floor((ch.length - N_FFT) / HOP) + 1;
-
-  const hann = new Float32Array(N_FFT);
-  for (let i = 0; i < N_FFT; i++) hann[i] = 0.5 - 0.5 * Math.cos(2 * Math.PI * i / (N_FFT - 1));
-
-  const fMin = 0, fMax = Math.min(8000, sr / 2);
+function buildMelFilters(N_FFT, sr) {
+  const fMax = Math.min(8000, sr / 2);
   const N_MELS = Math.round(128 * (fMax / (sr / 2)));
-  const mMin = hzToMel(fMin), mMax = hzToMel(fMax);
-
+  const mMin = hzToMel(0), mMax = hzToMel(fMax);
   const melPoints = Array.from({ length: N_MELS + 2 }, (_, i) =>
     melToHz(mMin + (mMax - mMin) * i / (N_MELS + 1))
   );
   const binPoints = melPoints.map(hz => Math.floor((N_FFT / 2 + 1) * hz / (sr / 2)));
-
   const filters = Array.from({ length: N_MELS }, (_, m) => {
     const lo = binPoints[m], center = binPoints[m + 1], hi = binPoints[m + 2];
     const f = new Float32Array(N_FFT / 2 + 1);
@@ -96,12 +86,18 @@ export function buildMelSpectrogram(audioBuffer, colormapFn = inferno) {
     for (let k = center; k < hi; k++) if (hi > center) f[k] = (hi - k) / (hi - center);
     return f;
   });
+  return { filters, N_MELS };
+}
+
+function computeSpec(ch, sr, startSample, frames, N_FFT, HOP, filters, N_MELS) {
+  const hann = new Float32Array(N_FFT);
+  for (let i = 0; i < N_FFT; i++) hann[i] = 0.5 - 0.5 * Math.cos(2 * Math.PI * i / (N_FFT - 1));
 
   const spec = new Float32Array(N_MELS * frames);
   const re = new Float32Array(N_FFT), im = new Float32Array(N_FFT);
 
   for (let fr = 0; fr < frames; fr++) {
-    const off = fr * HOP;
+    const off = startSample + fr * HOP;
     re.fill(0); im.fill(0);
     for (let i = 0; i < N_FFT; i++) re[i] = (ch[off + i] || 0) * hann[i];
     fft(re, im);
@@ -114,32 +110,33 @@ export function buildMelSpectrogram(audioBuffer, colormapFn = inferno) {
       spec[m * frames + fr] = Math.max(1e-10, val);
     }
   }
+  return spec;
+}
 
-  // Log-normalize
+
+function normalizeSpec(spec) {
+  for (let i = 0; i < spec.length; i++) spec[i] = Math.log(spec[i]);
   let maxV = -Infinity, minV = Infinity;
   for (let i = 0; i < spec.length; i++) {
-    spec[i] = Math.log(spec[i]);
     if (spec[i] > maxV) maxV = spec[i];
     if (spec[i] < minV) minV = spec[i];
   }
   const range = maxV - minV || 1;
   for (let i = 0; i < spec.length; i++) spec[i] = (spec[i] - minV) / range;
-
-  // Render to offscreen canvas
-  const oc = document.createElement('canvas');
-  oc.width = frames; oc.height = N_MELS;
-  const ctx = oc.getContext('2d');
-  const img = ctx.createImageData(frames, N_MELS);
-  for (let m = 0; m < N_MELS; m++) {
-    for (let fr = 0; fr < frames; fr++) {
-      const [r, g, b] = colormapFn(spec[m * frames + fr]);
-      const pidx = ((N_MELS - 1 - m) * frames + fr) * 4;
-      img.data[pidx] = r; img.data[pidx+1] = g; img.data[pidx+2] = b; img.data[pidx+3] = 255;
-    }
-  }
-  ctx.putImageData(img, 0, 0);
-  return { canvas: oc, duration: ch.length / sr, frames, hop: HOP, sr };
 }
+
+// Full-file spectrogram at coarse resolution (HOP=512, fast).
+export function buildMelSpectrogram(audioBuffer, colormapFn = inferno) {
+  const sr = audioBuffer.sampleRate;
+  const ch = audioBuffer.getChannelData(0);
+  const N_FFT = 2048, HOP = 512;
+  const frames = Math.floor((ch.length - N_FFT) / HOP) + 1;
+  const { filters, N_MELS } = buildMelFilters(N_FFT, sr);
+  const spec = computeSpec(ch, sr, 0, frames, N_FFT, HOP, filters, N_MELS);
+  normalizeSpec(spec);
+  return { spec, N_MELS, colormapFn, duration: ch.length / sr, frames, hop: HOP, sr };
+}
+
 
 // ── RMS envelope ─────────────────────────────────────────────────────────
 

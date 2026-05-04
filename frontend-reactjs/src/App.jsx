@@ -6,6 +6,7 @@ import {
   buildMelSpectrogram, buildRmsEnvelope, buildFormantTrack,
 } from './dsp.js';
 
+
 const BUNDLED_WAV = 'Bluey_blueyp1aud_region280-350s.wav';
 const BUNDLED_TG  = 'Bluey_blueyp1aud_region280%E2%80%93350s_original.TextGrid';
 
@@ -21,6 +22,15 @@ export default function App() {
   const [dropping, setDropping]         = useState(false);
   const [colormapName, setColormapName] = useState('inferno');
   const [showFormants, setShowFormants] = useState(false);
+  const [specComputing, setSpecComputing] = useState(false);
+  const [formantComputing, setFormantComputing] = useState(false);
+  const panelSplitRef  = useRef(0.45);
+  const wavePanelRef   = useRef(null);
+  const specPanelRef   = useRef(null);
+  const wrdTierRef     = useRef(null);
+  const phnTierRef     = useRef(null);
+  const panelsDivRef   = useRef(null);
+  const tiersDivRef    = useRef(null);
 
   // ── Refs (hot-path values read inside callbacks without re-render) ─────
   const viewRef          = useRef({ t0: 0, t1: 20 });
@@ -37,7 +47,10 @@ export default function App() {
   const selectionRef     = useRef(null);
   const waveformDataRef  = useRef(null);
   const spectroRef       = useRef(null);
-  const spectroCacheRef  = useRef({ key: '', canvas: null });
+  const spectroCacheRef  = useRef({ canvas: null });
+  const specWorkerRef    = useRef(null);
+  const formantWorkerRef = useRef(null);
+  const formantViewRef   = useRef(null); // { t0, t1 } of the last computed region
   const wordsRef         = useRef([]);
   const phonesRef        = useRef([]);
   const durationRef      = useRef(70);
@@ -98,30 +111,106 @@ export default function App() {
     ctx.fillStyle = '#0d0d10'; ctx.fillRect(0, 0, w, h);
     drawSelectionRect(ctx, w, h, 0.15);
     const mid = h / 2;
+
+    // Center line
+    ctx.strokeStyle = 'rgba(255,255,255,0.06)'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(0, mid); ctx.lineTo(w, mid); ctx.stroke();
+
+    const rawCh = audioBufferRef.current ? audioBufferRef.current.getChannelData(0) : null;
     const data = waveformDataRef.current;
-    if (data) {
-      const N = data.length;
-      ctx.fillStyle = '#4a8be5';
-      for (let cx = 0; cx < w; cx++) {
-        const t = t0 + (cx / w) * (t1 - t0);
-        const idx = Math.max(0, Math.min(N - 1, Math.floor((t / DUR) * N)));
-        const amp = (data[idx] || 0) * mid * 0.9;
-        ctx.fillRect(cx, mid - amp, 1, amp * 2);
+    if (rawCh || data) {
+      const rawLen = rawCh ? rawCh.length : 0;
+      const samplesPerPx = rawCh ? ((t1 - t0) * rawLen / DUR) / w : Infinity;
+
+      // Compute peak in the visible window for auto-gain
+      let viewPeak = 0;
+      if (rawCh) {
+        const iA = Math.max(0, Math.floor((t0 / DUR) * rawLen));
+        const iB = Math.min(rawLen - 1, Math.ceil((t1 / DUR) * rawLen));
+        // Sample ~2000 points for speed
+        const stride = Math.max(1, Math.floor((iB - iA) / 2000));
+        for (let i = iA; i <= iB; i += stride) {
+          const v = Math.abs(rawCh[i]);
+          if (v > viewPeak) viewPeak = v;
+        }
+      } else {
+        const N = data.length;
+        const iA = Math.max(0, Math.floor((t0 / DUR) * N));
+        const iB = Math.min(N - 1, Math.ceil((t1 / DUR) * N));
+        for (let i = iA; i <= iB; i++) if (data[i] > viewPeak) viewPeak = data[i];
       }
-      const rms = rmsEnvRef.current;
-      if (rms) {
-        ctx.strokeStyle = 'rgba(120,210,255,0.75)';
-        ctx.lineWidth = 1.5;
-        for (const sign of [-1, 1]) {
-          ctx.beginPath();
-          let started = false;
-          for (let cx = 0; cx < w; cx++) {
-            const t = t0 + (cx / w) * (t1 - t0);
-            const fr = Math.max(0, Math.min(rms.frames - 1, Math.floor((t / DUR) * rms.frames)));
-            const y = mid + sign * (rms.env[fr] || 0) * mid * 0.9;
-            if (!started) { ctx.moveTo(cx, y); started = true; } else ctx.lineTo(cx, y);
+      const gain = viewPeak > 0.01 ? 0.46 / viewPeak : 0.5;
+
+      if (rawCh && samplesPerPx <= 2) {
+        // ── Line trace: draw actual sample values (Praat style) ──────────
+        ctx.strokeStyle = '#c8c6c1'; ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        let started = false;
+        const steps = Math.max(w, Math.ceil((t1 - t0) * rawLen / DUR));
+        for (let i = 0; i <= steps; i++) {
+          const t = t0 + (i / steps) * (t1 - t0);
+          const si = Math.max(0, Math.min(rawLen - 1, Math.round((t / DUR) * rawLen)));
+          const x = ((t - t0) / (t1 - t0)) * w;
+          const y = mid - rawCh[si] * gain * mid;
+          if (!started) { ctx.moveTo(x, y); started = true; } else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+
+        // Dot on each sample when very zoomed in
+        if (samplesPerPx < 0.25) {
+          const iA = Math.max(0, Math.floor((t0 / DUR) * rawLen));
+          const iB = Math.min(rawLen - 1, Math.ceil((t1 / DUR) * rawLen));
+          ctx.fillStyle = '#4a8be5';
+          for (let i = iA; i <= iB; i++) {
+            const t = (i / rawLen) * DUR;
+            const x = ((t - t0) / (t1 - t0)) * w;
+            const y = mid - rawCh[i] * gain * mid;
+            ctx.beginPath(); ctx.arc(x, y, 2.5, 0, Math.PI * 2); ctx.fill();
           }
-          ctx.stroke();
+        }
+      } else if (rawCh && samplesPerPx <= 200) {
+        // ── Min/max bars: shows waveform shape with correct peaks ─────────
+        ctx.fillStyle = '#3a7bd5';
+        for (let cx = 0; cx < w; cx++) {
+          const tA = t0 + (cx / w) * (t1 - t0);
+          const tB = t0 + ((cx + 1) / w) * (t1 - t0);
+          const iA = Math.max(0, Math.floor((tA / DUR) * rawLen));
+          const iB = Math.min(rawLen - 1, Math.ceil((tB / DUR) * rawLen));
+          let mn = 0, mx = 0;
+          for (let i = iA; i <= iB; i++) {
+            const v = rawCh[i];
+            if (v > mx) mx = v;
+            if (v < mn) mn = v;
+          }
+          const yTop = mid - mx * gain * mid;
+          const yBot = mid - mn * gain * mid;
+          ctx.fillRect(cx, yTop, 1, Math.max(1, yBot - yTop));
+        }
+        // RMS envelope overlay
+        const rms = rmsEnvRef.current;
+        if (rms) {
+          ctx.strokeStyle = 'rgba(120,210,255,0.6)'; ctx.lineWidth = 1.2;
+          for (const sign of [-1, 1]) {
+            ctx.beginPath(); let started = false;
+            for (let cx = 0; cx < w; cx++) {
+              const t = t0 + (cx / w) * (t1 - t0);
+              const fr = Math.max(0, Math.min(rms.frames - 1, Math.floor((t / DUR) * rms.frames)));
+              const y = mid + sign * (rms.env[fr] || 0) * gain * mid;
+              if (!started) { ctx.moveTo(cx, y); started = true; } else ctx.lineTo(cx, y);
+            }
+            ctx.stroke();
+          }
+        }
+      } else {
+        // ── Peak overview: fast bar render from downsampled peaks ─────────
+        const peakData = data || new Float32Array(0);
+        const N = peakData.length;
+        ctx.fillStyle = '#3a6bb5';
+        for (let cx = 0; cx < w; cx++) {
+          const tA = t0 + (cx / w) * (t1 - t0);
+          const idx = Math.max(0, Math.min(N - 1, Math.floor((tA / DUR) * N)));
+          const amp = (peakData[idx] || 0) * gain * mid;
+          ctx.fillRect(cx, mid - amp, 1, amp * 2);
         }
       }
     }
@@ -136,22 +225,62 @@ export default function App() {
     ctx.fillStyle = '#090910'; ctx.fillRect(0, 0, w, h);
     const sp = spectroRef.current;
     if (sp) {
-      const cacheKey = `${t0.toFixed(4)}_${t1.toFixed(4)}_${w}_${h}`;
-      if (spectroCacheRef.current.key !== cacheKey) {
-        const srcX = Math.floor((t0 / sp.duration) * sp.frames);
-        const srcW = Math.ceil(((t1 - t0) / sp.duration) * sp.frames);
+      const dpr = window.devicePixelRatio || 1;
+      const pw = Math.round(w * dpr);
+      const ph = Math.round(h * dpr);
+
+      const cache = spectroCacheRef.current;
+      if (cache.canvas && cache.stripT0 <= t0 && cache.stripT1 >= t1 && cache.ph === ph) {
+        // Blit from cache
+        const { canvas: strip, stripT0, stripT1, stripPw } = cache;
+        const totalSpan = stripT1 - stripT0;
+        const span = t1 - t0;
+        const srcX = Math.round(((t0 - stripT0) / totalSpan) * stripPw);
+        const srcW = Math.round((span / totalSpan) * stripPw);
+        ctx.save();
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.drawImage(strip, Math.max(0, srcX), 0, Math.max(1, srcW), ph, 0, 0, pw, ph);
+        ctx.restore();
+      } else {
+        // Fall back to rendering global spec via bilinear interpolation
+        const { spec, N_MELS, colormapFn, frames, duration, t0: srcT0 = 0 } = sp;
+        const framesM1 = frames - 1;
+        const melsM1 = N_MELS - 1;
         const oc = document.createElement('canvas');
-        oc.width = w; oc.height = h;
-        oc.getContext('2d').drawImage(sp.canvas, srcX, 0, Math.max(1, srcW), sp.canvas.height, 0, 0, w, h);
-        spectroCacheRef.current = { key: cacheKey, canvas: oc };
+        oc.width = pw; oc.height = ph;
+        const octx = oc.getContext('2d');
+        const img = octx.createImageData(pw, ph);
+        const idata = img.data;
+        for (let cx = 0; cx < pw; cx++) {
+          const t = t0 + (cx / pw) * (t1 - t0);
+          const frf = Math.max(0, Math.min(framesM1, ((t - srcT0) / duration) * frames));
+          const fr0 = Math.floor(frf), fr1 = Math.min(framesM1, fr0 + 1);
+          const ft = frf - fr0;
+          for (let cy = 0; cy < ph; cy++) {
+            const mf = ((ph - 1 - cy) / (ph - 1)) * melsM1;
+            const m0 = Math.floor(mf), m1 = Math.min(melsM1, m0 + 1);
+            const mt = mf - m0;
+            const v00 = spec[m0 * frames + fr0], v10 = spec[m1 * frames + fr0];
+            const v01 = spec[m0 * frames + fr1], v11 = spec[m1 * frames + fr1];
+            const val = v00*(1-ft)*(1-mt) + v01*ft*(1-mt) + v10*(1-ft)*mt + v11*ft*mt;
+            const [r, g, b] = colormapFn(val);
+            const pidx = (cy * pw + cx) * 4;
+            idata[pidx] = r; idata[pidx+1] = g; idata[pidx+2] = b; idata[pidx+3] = 255;
+          }
+        }
+        octx.putImageData(img, 0, 0);
+        ctx.save();
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.drawImage(oc, 0, 0, pw, ph, 0, 0, pw, ph);
+        ctx.restore();
       }
-      ctx.drawImage(spectroCacheRef.current.canvas, 0, 0);
     }
     drawSelectionRect(ctx, w, h, 0.18);
     if (showFormantsRef.current) {
       const ft = formantTrackRef.current;
       if (ft) {
-        const DUR = durationRef.current;
+        const rT0 = ft.regionT0 ?? 0;
+        const regionDur = (ft.frames * ft.hop) / ft.sr;
         const FMAX = Math.min(8000, ft.sr / 2);
         const colors = ['rgba(255,80,80,0.85)', 'rgba(80,220,80,0.85)', 'rgba(80,140,255,0.85)'];
         for (const [fi, fdata] of [[0, ft.f1], [1, ft.f2], [2, ft.f3]]) {
@@ -160,7 +289,9 @@ export default function App() {
           let started = false;
           for (let cx = 0; cx < w; cx++) {
             const t = t0 + (cx / w) * (t1 - t0);
-            const fr = Math.max(0, Math.min(ft.frames - 1, Math.floor((t / DUR) * ft.frames)));
+            const localT = t - rT0;
+            if (localT < 0 || localT > regionDur) { started = false; continue; }
+            const fr = Math.max(0, Math.min(ft.frames - 1, Math.floor((localT / regionDur) * ft.frames)));
             const hz = fdata[fr];
             if (!hz) { started = false; continue; }
             const y = h - (hz / FMAX) * h;
@@ -176,7 +307,7 @@ export default function App() {
     ctx.fillText('1kHz', 4, h * (1 - 1000/8000) - 1);
     ctx.fillText('100Hz', 4, h - 3);
     drawPlayheadLine(ctx, w, h);
-  }, [tX, drawSelectionRect, drawPlayheadLine]);
+  }, [drawSelectionRect, drawPlayheadLine]);
 
   const drawRuler = useCallback(() => {
     const s = setupCanvas(rulerCanvasRef.current);
@@ -291,6 +422,105 @@ export default function App() {
     drawMinimap();
   }, [drawWave, drawSpec, drawRuler, drawTier, drawMinimap]);
 
+  const calcSpecForView = useCallback(() => {
+    const buf = audioBufferRef.current;
+    const sp  = spectroRef.current;
+    if (!buf || !sp) return;
+    setSpecComputing(true);
+    const { t0, t1 } = viewRef.current;
+    const span = t1 - t0;
+    const canvas = specCanvasRef.current;
+    const dpr = window.devicePixelRatio || 1;
+    const pw = canvas ? Math.round(canvas.offsetWidth * dpr) : 1400;
+    const ph = canvas ? Math.round(canvas.offsetHeight * dpr) : 400;
+
+    // Pick hop: finer for zoomed-in views, capped at 512 for overview
+    const sr = buf.sampleRate;
+    const targetFrames = pw * 2;
+    let hop = 512;
+    for (const h of [256, 128, 64, 32, 16]) {
+      if ((span * sr) / h >= targetFrames) { hop = h; break; }
+      hop = h;
+    }
+
+    const startSample = Math.max(0, Math.floor(t0 * sr) - 2048);
+    const endSample   = Math.min(buf.length, Math.ceil(t1 * sr) + 2048);
+    const regionT0    = startSample / sr;
+    const region      = buf.getChannelData(0).slice(startSample, endSample);
+
+    if (specWorkerRef.current) specWorkerRef.current.terminate();
+    const worker = new Worker(new URL('./specWorker.js', import.meta.url), { type: 'module' });
+    specWorkerRef.current = worker;
+
+    worker.onmessage = ({ data }) => {
+      worker.terminate();
+      specWorkerRef.current = null;
+      const src = { ...data, t0: regionT0, colormapFn: sp.colormapFn };
+      // Render strip at physical resolution
+      const { spec, N_MELS, colormapFn, frames, duration, t0: srcT0 } = src;
+      const oc = document.createElement('canvas');
+      oc.width = pw; oc.height = ph;
+      const octx = oc.getContext('2d');
+      const img = octx.createImageData(pw, ph);
+      const idata = img.data;
+      const framesM1 = frames - 1, melsM1 = N_MELS - 1;
+      for (let cx = 0; cx < pw; cx++) {
+        const t = t0 + (cx / pw) * (t1 - t0);
+        const frf = Math.max(0, Math.min(framesM1, ((t - srcT0) / duration) * frames));
+        const fr0 = Math.floor(frf), fr1 = Math.min(framesM1, fr0 + 1);
+        const ft = frf - fr0;
+        for (let cy = 0; cy < ph; cy++) {
+          const mf = ((ph - 1 - cy) / (ph - 1)) * melsM1;
+          const m0 = Math.floor(mf), m1 = Math.min(melsM1, m0 + 1);
+          const mt = mf - m0;
+          const v00 = spec[m0 * frames + fr0], v10 = spec[m1 * frames + fr0];
+          const v01 = spec[m0 * frames + fr1], v11 = spec[m1 * frames + fr1];
+          const val = v00*(1-ft)*(1-mt) + v01*ft*(1-mt) + v10*(1-ft)*mt + v11*ft*mt;
+          const [r, g, b] = colormapFn(val);
+          const pidx = (cy * pw + cx) * 4;
+          idata[pidx] = r; idata[pidx+1] = g; idata[pidx+2] = b; idata[pidx+3] = 255;
+        }
+      }
+      octx.putImageData(img, 0, 0);
+      spectroCacheRef.current = { canvas: oc, ph, stripT0: t0, stripT1: t1, stripPw: pw };
+      setSpecComputing(false);
+      drawSpec();
+    };
+
+    worker.postMessage(
+      { ch: region, sr, t0, t1, hop, N_FFT: 2048, id: 1, regionT0 },
+      [region.buffer]
+    );
+  }, [drawSpec]);
+
+  const calcFormantForView = useCallback(() => {
+    const buf = audioBufferRef.current;
+    if (!buf) return;
+    setFormantComputing(true);
+    const { t0, t1 } = viewRef.current;
+    const sr = buf.sampleRate;
+    const startSample = Math.max(0, Math.floor(t0 * sr) - 1024);
+    const endSample   = Math.min(buf.length, Math.ceil(t1 * sr) + 1024);
+    const regionT0    = startSample / sr;
+    const region      = buf.getChannelData(0).slice(startSample, endSample);
+
+    if (formantWorkerRef.current) formantWorkerRef.current.terminate();
+    const worker = new Worker(new URL('./formantWorker.js', import.meta.url), { type: 'module' });
+    formantWorkerRef.current = worker;
+
+    worker.onmessage = ({ data }) => {
+      worker.terminate();
+      formantWorkerRef.current = null;
+      formantTrackRef.current = { ...data, regionT0 };
+      formantViewRef.current  = { t0, t1 };
+      setFormantComputing(false);
+      if (!showFormantsRef.current) { showFormantsRef.current = true; setShowFormants(true); }
+      drawSpec();
+    };
+
+    worker.postMessage({ ch: region, sr, regionT0, id: 1 }, [region.buffer]);
+  }, [drawSpec]);
+
   // ── Audio context ─────────────────────────────────────────────────────
   const getAudioCtx = () => {
     if (!audioCtxRef.current)
@@ -334,7 +564,6 @@ export default function App() {
     if (playheadRef.current > t1 - pad) {
       const newT0 = Math.min(DUR - span, playheadRef.current - pad);
       viewRef.current = { t0: newT0, t1: newT0 + span };
-      spectroCacheRef.current = { key: '', canvas: null };
       redraw();
     }
     drawOverlay();
@@ -386,13 +615,11 @@ export default function App() {
     }
     waveformDataRef.current = peaks;
     rmsEnvRef.current = buildRmsEnvelope(buffer);
-    spectroCacheRef.current = { key: '', canvas: null };
     redraw();
 
     // Heavy DSP deferred so the UI stays responsive
     setTimeout(() => {
       spectroRef.current = buildMelSpectrogram(buffer, COLORMAPS[colormapNameRef.current] || inferno);
-      spectroCacheRef.current = { key: '', canvas: null };
       redraw();
       setTimeout(() => {
         formantTrackRef.current = buildFormantTrack(buffer);
@@ -437,7 +664,6 @@ export default function App() {
     const el = document.getElementById('root');
     if (!el) return;
     const ro = new ResizeObserver(() => {
-      spectroCacheRef.current = { key: '', canvas: null };
       redraw();
     });
     ro.observe(el);
@@ -465,11 +691,11 @@ export default function App() {
       }
       if (e.code === 'KeyF') {
         viewRef.current = { t0: 0, t1: DUR };
-        spectroCacheRef.current = { key: '', canvas: null }; redraw();
+        redraw();
       }
       if (e.code === 'Home') {
         viewRef.current = { t0: 0, t1: Math.min(DUR, 20) };
-        spectroCacheRef.current = { key: '', canvas: null }; redraw();
+        redraw();
       }
       if (e.code === 'ArrowLeft' || e.code === 'ArrowRight') {
         const { t0, t1 } = viewRef.current;
@@ -477,7 +703,7 @@ export default function App() {
         const delta = span * 0.2 * (e.code === 'ArrowRight' ? 1 : -1);
         const newT0 = Math.max(0, Math.min(DUR - span, t0 + delta));
         viewRef.current = { t0: newT0, t1: newT0 + span };
-        spectroCacheRef.current = { key: '', canvas: null }; redraw();
+        redraw();
       }
     };
     window.addEventListener('keydown', handler);
@@ -504,7 +730,6 @@ export default function App() {
     let newT1 = Math.min(DUR, newT0 + ns);
     if (newT1 - newT0 < ns) newT0 = newT1 - ns;
     viewRef.current = { t0: newT0, t1: newT1 };
-    spectroCacheRef.current = { key: '', canvas: null };
     setZoomValue(spanToSlider(newT1 - newT0));
     redraw();
   }, [spanToSlider, redraw]);
@@ -537,7 +762,6 @@ export default function App() {
         const newT0 = Math.max(0, Math.min(DUR - span, t0 + (delta / rect.width) * span * 0.8));
         viewRef.current = { t0: newT0, t1: newT0 + span };
       }
-      spectroCacheRef.current = { key: '', canvas: null };
       setZoomValue(spanToSlider(viewRef.current.t1 - viewRef.current.t0));
       redraw();
     };
@@ -601,7 +825,6 @@ export default function App() {
       const t = (Math.max(0, Math.min(rect.width, x)) / rect.width) * DUR;
       const newT0 = Math.max(0, Math.min(DUR - span, t - span/2));
       viewRef.current = { t0: newT0, t1: newT0 + span };
-      spectroCacheRef.current = { key: '', canvas: null };
       redraw();
     };
     const onDown = (e) => {
@@ -675,7 +898,7 @@ export default function App() {
     const buf = audioBufferRef.current;
     if (!buf) return;
     spectroRef.current = buildMelSpectrogram(buf, COLORMAPS[name] || inferno);
-    spectroCacheRef.current = { key: '', canvas: null };
+    spectroCacheRef.current = { canvas: null };
     redraw();
   }, [redraw]);
 
@@ -738,48 +961,137 @@ export default function App() {
           <option value="viridis">Viridis</option>
           <option value="greys">Greys</option>
         </select>
-        <button
-          className={`btn${showFormants ? ' active' : ''}`}
-          onClick={() => { const n = !showFormants; showFormantsRef.current = n; setShowFormants(n); redraw(); }}
-          title="Toggle formant overlay (F1/F2/F3)"
-        >F1·F2·F3</button>
       </div>
 
       <div className="timeline" ref={timelineRef}>
         <canvas className="playhead-overlay" ref={overlayCanvasRef} />
 
-        <div className="panels">
-          <div className="panel" style={{ flex: 1 }}>
+        <div className="timeline-body">
+        <div className="panels" ref={panelsDivRef}>
+          <div className="panel" ref={wavePanelRef} style={{ flex: panelSplitRef.current }}>
             <div className="panel-gutter">WV</div>
             <div className="panel-body">
               <div className="panel-tag">Waveform</div>
               <canvas ref={waveCanvasRef} style={{ height: '100%' }} />
             </div>
           </div>
-          <div className="panel" style={{ flex: 1.2 }}>
+          <div
+            className="panel-divider"
+            onMouseDown={(e) => {
+              e.preventDefault();
+              const panels = e.currentTarget.closest('.panels');
+              const onMove = (ev) => {
+                const rect = panels.getBoundingClientRect();
+                const fraction = Math.max(0.1, Math.min(0.9, (ev.clientY - rect.top) / rect.height));
+                panelSplitRef.current = fraction;
+                if (wavePanelRef.current) wavePanelRef.current.style.flex = fraction;
+                if (specPanelRef.current) specPanelRef.current.style.flex = 1 - fraction;
+              };
+              const onUp = () => {
+                window.removeEventListener('mousemove', onMove);
+                window.removeEventListener('mouseup', onUp);
+                redraw();
+              };
+              window.addEventListener('mousemove', onMove);
+              window.addEventListener('mouseup', onUp);
+            }}
+          />
+          <div className="panel" ref={specPanelRef} style={{ flex: 1 - panelSplitRef.current }}>
             <div className="panel-gutter">SP</div>
             <div className="panel-body">
               <div className="panel-tag">Spectrogram</div>
               <canvas ref={specCanvasRef} style={{ height: '100%' }} />
+              <div className="spec-overlay-btns">
+                <button
+                  className={`calc-spec-btn${specComputing ? ' computing' : ''}`}
+                  onClick={calcSpecForView}
+                  disabled={specComputing}
+                  title="Calculate high-res spectrogram for current view"
+                >
+                  {specComputing ? '⟳ Calc…' : '⟳ Calc Spec'}
+                </button>
+                <div className="formant-btn-group">
+                  <button
+                    className={`calc-spec-btn${showFormants ? ' active' : ''}`}
+                    onClick={() => { const n = !showFormants; showFormantsRef.current = n; setShowFormants(n); redraw(); }}
+                    title="Toggle F1/F2/F3 overlay"
+                  >
+                    {showFormants ? '● Formants' : '○ Formants'}
+                  </button>
+                  <button
+                    className={`calc-spec-btn${formantComputing ? ' computing' : ''}`}
+                    onClick={calcFormantForView}
+                    disabled={formantComputing}
+                    title="Calculate formants for current view"
+                  >
+                    {formantComputing ? '⟳ …' : '⟳ Calc F1·F2·F3'}
+                  </button>
+                </div>
+              </div>
             </div>
           </div>
         </div>
 
+        <div
+          className="tier-divider"
+          onMouseDown={(e) => {
+            e.preventDefault();
+            const body = panelsDivRef.current.parentElement;
+            const onMove = (ev) => {
+              const rect = body.getBoundingClientRect();
+              const fraction = Math.max(0.1, Math.min(0.9, (ev.clientY - rect.top) / rect.height));
+              panelsDivRef.current.style.flex = String(fraction);
+              tiersDivRef.current.style.flex  = String(1 - fraction);
+            };
+            const onUp = () => {
+              window.removeEventListener('mousemove', onMove);
+              window.removeEventListener('mouseup', onUp);
+              redraw();
+            };
+            window.addEventListener('mousemove', onMove);
+            window.addEventListener('mouseup', onUp);
+          }}
+        />
         <div className="ruler">
           <div className="ruler-gutter" />
           <canvas ref={rulerCanvasRef} />
         </div>
 
-        <div className="tiers">
-          <div className="tier">
+        <div className="tiers" ref={tiersDivRef}>
+          <div className="tier" ref={wrdTierRef}>
             <div className="tier-gutter">WRD</div>
             <canvas ref={wordsCanvasRef} />
           </div>
-          <div className="tier">
+          <div
+            className="tier-divider"
+            onMouseDown={(e) => {
+              e.preventDefault();
+              const startY = e.clientY;
+              const startWrd = wrdTierRef.current.offsetHeight;
+              const startPhn = phnTierRef.current.offsetHeight;
+              const total = startWrd + startPhn;
+              const onMove = (ev) => {
+                const delta = ev.clientY - startY;
+                const newWrd = Math.max(20, Math.min(total - 20, startWrd + delta));
+                wrdTierRef.current.style.flex = String(newWrd / total);
+                phnTierRef.current.style.flex = String((total - newWrd) / total);
+              };
+              const onUp = () => {
+                window.removeEventListener('mousemove', onMove);
+                window.removeEventListener('mouseup', onUp);
+                redraw();
+              };
+              window.addEventListener('mousemove', onMove);
+              window.addEventListener('mouseup', onUp);
+            }}
+          />
+          <div className="tier" ref={phnTierRef}>
             <div className="tier-gutter">PHN</div>
             <canvas ref={phonesCanvasRef} />
           </div>
         </div>
+
+        </div>{/* timeline-body */}
 
         <div className="minimap">
           <div className="minimap-gutter" />

@@ -48,11 +48,18 @@ html, body {
 .timeline {
   flex: 1; min-height: 0;
   display: flex; flex-direction: column; position: relative;
+  overflow: hidden;
+}
+
+/* ── Timeline inner body (everything except minimap) ── */
+.timeline-body {
+  flex: 1; min-height: 0;
+  display: flex; flex-direction: column; overflow: hidden;
 }
 
 /* ── Panels (waveform + spectrogram) ── */
 .panels {
-  flex: 1; min-height: 0;
+  flex: 0.82; min-height: 60px;
   display: flex; flex-direction: column;
   border-bottom: 1px solid #1e1e24;
 }
@@ -61,6 +68,12 @@ html, body {
   border-bottom: 1px solid #1e1e24;
 }
 .panel:last-child { border-bottom: none; }
+.panel-divider {
+  height: 5px; flex-shrink: 0; cursor: row-resize;
+  background: #1e1e24;
+  transition: background 100ms;
+}
+.panel-divider:hover, .panel-divider:active { background: #3a7bd5; }
 .panel-gutter {
   width: 56px; flex-shrink: 0;
   display: flex; align-items: center; justify-content: center;
@@ -90,11 +103,16 @@ html, body {
 .ruler canvas { flex: 1; min-width: 0; display: block; }
 
 /* ── Tiers ── */
-.tiers { flex-shrink: 0; display: flex; flex-direction: column; }
+.tiers { flex: 0.18; min-height: 40px; display: flex; flex-direction: column; overflow: hidden; }
 .tier {
-  height: 36px; display: flex;
-  border-bottom: 1px solid #1e1e24;
+  flex: 1; min-height: 20px; display: flex;
+  border-bottom: 1px solid #1e1e24; overflow: hidden;
 }
+.tier-divider {
+  height: 5px; flex-shrink: 0; cursor: row-resize;
+  background: #1e1e24; transition: background 100ms;
+}
+.tier-divider:hover, .tier-divider:active { background: #3a7bd5; }
 .tier-gutter {
   width: 56px; flex-shrink: 0;
   display: flex; align-items: center; justify-content: center;
@@ -133,6 +151,26 @@ html, body {
   min-width: 120px;
 }
 .token-popup.show { opacity: 1; transform: translateY(0); }
+
+/* ── Spectrogram overlay buttons ── */
+.spec-overlay-btns {
+  position: absolute; top: 6px; right: 8px; z-index: 5;
+  display: flex; flex-direction: column; align-items: flex-end; gap: 4px;
+}
+.formant-btn-group {
+  display: flex; flex-direction: row; gap: 3px;
+}
+.calc-spec-btn {
+  padding: 4px 10px; border-radius: 5px; border: 1px solid rgba(58,123,213,0.5);
+  background: rgba(20,20,28,0.82); color: #7aacf0; font-size: 11px;
+  font-family: inherit; cursor: pointer; backdrop-filter: blur(4px);
+  transition: background 100ms, color 100ms, border-color 100ms;
+  white-space: nowrap;
+}
+.calc-spec-btn:hover { background: rgba(58,123,213,0.25); color: #c8deff; border-color: #3a7bd5; }
+.calc-spec-btn.computing { color: #f0c070; border-color: rgba(240,192,112,0.5); cursor: wait; }
+.calc-spec-btn.active { background: rgba(58,123,213,0.3); color: #c8deff; border-color: #3a7bd5; }
+.calc-spec-btn:disabled { pointer-events: none; }
 
 /* ── Drop overlay ── */
 .drop-overlay {
