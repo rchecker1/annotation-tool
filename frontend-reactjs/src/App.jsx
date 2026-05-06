@@ -48,6 +48,8 @@ export default function App() {
   const waveformDataRef  = useRef(null);
   const spectroRef       = useRef(null);
   const spectroCacheRef  = useRef({ canvas: null });
+  const zoomRafRef       = useRef(null);
+  const viewPeakRef      = useRef({ t0: -1, t1: -1, peak: 0 });
   const specWorkerRef    = useRef(null);
   const formantWorkerRef = useRef(null);
   const formantViewRef   = useRef(null); // { t0, t1 } of the last computed region
@@ -112,7 +114,6 @@ export default function App() {
     drawSelectionRect(ctx, w, h, 0.15);
     const mid = h / 2;
 
-    // Center line
     ctx.strokeStyle = 'rgba(255,255,255,0.06)'; ctx.lineWidth = 1;
     ctx.beginPath(); ctx.moveTo(0, mid); ctx.lineTo(w, mid); ctx.stroke();
 
@@ -122,24 +123,24 @@ export default function App() {
       const rawLen = rawCh ? rawCh.length : 0;
       const samplesPerPx = rawCh ? ((t1 - t0) * rawLen / DUR) / w : Infinity;
 
-      // Compute peak in the visible window for auto-gain
-      let viewPeak = 0;
-      if (rawCh) {
-        const iA = Math.max(0, Math.floor((t0 / DUR) * rawLen));
-        const iB = Math.min(rawLen - 1, Math.ceil((t1 / DUR) * rawLen));
-        // Sample ~2000 points for speed
-        const stride = Math.max(1, Math.floor((iB - iA) / 2000));
-        for (let i = iA; i <= iB; i += stride) {
-          const v = Math.abs(rawCh[i]);
-          if (v > viewPeak) viewPeak = v;
+      // Cache viewPeak — only recompute when the visible range changes
+      const cached = viewPeakRef.current;
+      if (cached.t0 !== t0 || cached.t1 !== t1) {
+        let peak = 0;
+        if (rawCh) {
+          const iA = Math.max(0, Math.floor((t0 / DUR) * rawLen));
+          const iB = Math.min(rawLen - 1, Math.ceil((t1 / DUR) * rawLen));
+          const stride = Math.max(1, Math.floor((iB - iA) / 2000));
+          for (let i = iA; i <= iB; i += stride) { const v = Math.abs(rawCh[i]); if (v > peak) peak = v; }
+        } else {
+          const N = data.length;
+          const iA = Math.max(0, Math.floor((t0 / DUR) * N));
+          const iB = Math.min(N - 1, Math.ceil((t1 / DUR) * N));
+          for (let i = iA; i <= iB; i++) if (data[i] > peak) peak = data[i];
         }
-      } else {
-        const N = data.length;
-        const iA = Math.max(0, Math.floor((t0 / DUR) * N));
-        const iB = Math.min(N - 1, Math.ceil((t1 / DUR) * N));
-        for (let i = iA; i <= iB; i++) if (data[i] > viewPeak) viewPeak = data[i];
+        viewPeakRef.current = { t0, t1, peak };
       }
-      const gain = viewPeak > 0.01 ? 0.46 / viewPeak : 0.5;
+      const gain = viewPeakRef.current.peak > 0.01 ? 0.46 / viewPeakRef.current.peak : 0.5;
 
       if (rawCh && samplesPerPx <= 2) {
         // ── Line trace: draw actual sample values (Praat style) ──────────
@@ -452,43 +453,19 @@ export default function App() {
     const worker = new Worker(new URL('./specWorker.js', import.meta.url), { type: 'module' });
     specWorkerRef.current = worker;
 
-    worker.onmessage = ({ data }) => {
+    worker.onmessage = ({ data: res }) => {
       worker.terminate();
       specWorkerRef.current = null;
-      const src = { ...data, t0: regionT0, colormapFn: sp.colormapFn };
-      // Render strip at physical resolution
-      const { spec, N_MELS, colormapFn, frames, duration, t0: srcT0 } = src;
       const oc = document.createElement('canvas');
-      oc.width = pw; oc.height = ph;
-      const octx = oc.getContext('2d');
-      const img = octx.createImageData(pw, ph);
-      const idata = img.data;
-      const framesM1 = frames - 1, melsM1 = N_MELS - 1;
-      for (let cx = 0; cx < pw; cx++) {
-        const t = t0 + (cx / pw) * (t1 - t0);
-        const frf = Math.max(0, Math.min(framesM1, ((t - srcT0) / duration) * frames));
-        const fr0 = Math.floor(frf), fr1 = Math.min(framesM1, fr0 + 1);
-        const ft = frf - fr0;
-        for (let cy = 0; cy < ph; cy++) {
-          const mf = ((ph - 1 - cy) / (ph - 1)) * melsM1;
-          const m0 = Math.floor(mf), m1 = Math.min(melsM1, m0 + 1);
-          const mt = mf - m0;
-          const v00 = spec[m0 * frames + fr0], v10 = spec[m1 * frames + fr0];
-          const v01 = spec[m0 * frames + fr1], v11 = spec[m1 * frames + fr1];
-          const val = v00*(1-ft)*(1-mt) + v01*ft*(1-mt) + v10*(1-ft)*mt + v11*ft*mt;
-          const [r, g, b] = colormapFn(val);
-          const pidx = (cy * pw + cx) * 4;
-          idata[pidx] = r; idata[pidx+1] = g; idata[pidx+2] = b; idata[pidx+3] = 255;
-        }
-      }
-      octx.putImageData(img, 0, 0);
+      oc.width = res.pw; oc.height = res.ph;
+      oc.getContext('2d').putImageData(new ImageData(res.pixels, res.pw, res.ph), 0, 0);
       spectroCacheRef.current = { canvas: oc, ph, stripT0: t0, stripT1: t1, stripPw: pw };
       setSpecComputing(false);
       drawSpec();
     };
 
     worker.postMessage(
-      { ch: region, sr, t0, t1, hop, N_FFT: 2048, id: 1, regionT0 },
+      { ch: region, sr, t0, t1, hop, N_FFT: 2048, pw, ph, colormapName: colormapNameRef.current, regionT0, id: 1 },
       [region.buffer]
     );
   }, [drawSpec]);
@@ -565,8 +542,9 @@ export default function App() {
       const newT0 = Math.min(DUR - span, playheadRef.current - pad);
       viewRef.current = { t0: newT0, t1: newT0 + span };
       redraw();
+    } else {
+      drawOverlay();
     }
-    drawOverlay();
     rafIdRef.current = requestAnimationFrame(tick);
   }, [drawOverlay, redraw, updateTimeDisplay]);
 
@@ -663,11 +641,13 @@ export default function App() {
   useEffect(() => {
     const el = document.getElementById('root');
     if (!el) return;
+    let raf = null;
     const ro = new ResizeObserver(() => {
-      redraw();
+      if (raf) cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(() => { raf = null; redraw(); });
     });
     ro.observe(el);
-    return () => ro.disconnect();
+    return () => { ro.disconnect(); if (raf) cancelAnimationFrame(raf); };
   }, [redraw]);
 
   // Keyboard shortcuts
@@ -762,7 +742,12 @@ export default function App() {
         const newT0 = Math.max(0, Math.min(DUR - span, t0 + (delta / rect.width) * span * 0.8));
         viewRef.current = { t0: newT0, t1: newT0 + span };
       }
-      setZoomValue(spanToSlider(viewRef.current.t1 - viewRef.current.t0));
+      // Defer React state update so it doesn't trigger re-render mid-scroll
+      if (zoomRafRef.current) cancelAnimationFrame(zoomRafRef.current);
+      zoomRafRef.current = requestAnimationFrame(() => {
+        setZoomValue(spanToSlider(viewRef.current.t1 - viewRef.current.t0));
+        zoomRafRef.current = null;
+      });
       redraw();
     };
     canvas.addEventListener('wheel', onWheel, { passive: false });
@@ -910,6 +895,23 @@ export default function App() {
     reader.readAsText(f);
   };
 
+  // ── Drag-to-resize helper ─────────────────────────────────────────────
+  const makeDragDivider = (getContainer, onMove) => ({
+    onMouseDown: (e) => {
+      e.preventDefault();
+      const container = getContainer(e.currentTarget);
+      const rect = container.getBoundingClientRect();
+      const move = (ev) => onMove(ev, rect);
+      const up = () => {
+        window.removeEventListener('mousemove', move);
+        window.removeEventListener('mouseup', up);
+        redraw();
+      };
+      window.addEventListener('mousemove', move);
+      window.addEventListener('mouseup', up);
+    },
+  });
+
   // ── JSX ───────────────────────────────────────────────────────────────
   return (
     <>
@@ -977,24 +979,15 @@ export default function App() {
           </div>
           <div
             className="panel-divider"
-            onMouseDown={(e) => {
-              e.preventDefault();
-              const panels = e.currentTarget.closest('.panels');
-              const onMove = (ev) => {
-                const rect = panels.getBoundingClientRect();
-                const fraction = Math.max(0.1, Math.min(0.9, (ev.clientY - rect.top) / rect.height));
-                panelSplitRef.current = fraction;
-                if (wavePanelRef.current) wavePanelRef.current.style.flex = fraction;
-                if (specPanelRef.current) specPanelRef.current.style.flex = 1 - fraction;
-              };
-              const onUp = () => {
-                window.removeEventListener('mousemove', onMove);
-                window.removeEventListener('mouseup', onUp);
-                redraw();
-              };
-              window.addEventListener('mousemove', onMove);
-              window.addEventListener('mouseup', onUp);
-            }}
+            {...makeDragDivider(
+              (el) => el.closest('.panels'),
+              (ev, rect) => {
+                const f = Math.max(0.1, Math.min(0.9, (ev.clientY - rect.top) / rect.height));
+                panelSplitRef.current = f;
+                wavePanelRef.current.style.flex = f;
+                specPanelRef.current.style.flex = 1 - f;
+              }
+            )}
           />
           <div className="panel" ref={specPanelRef} style={{ flex: 1 - panelSplitRef.current }}>
             <div className="panel-gutter">SP</div>
@@ -1034,23 +1027,14 @@ export default function App() {
 
         <div
           className="tier-divider"
-          onMouseDown={(e) => {
-            e.preventDefault();
-            const body = panelsDivRef.current.parentElement;
-            const onMove = (ev) => {
-              const rect = body.getBoundingClientRect();
+          {...makeDragDivider(
+            (el) => el.parentElement,
+            (ev, rect) => {
               const fraction = Math.max(0.1, Math.min(0.9, (ev.clientY - rect.top) / rect.height));
               panelsDivRef.current.style.flex = String(fraction);
               tiersDivRef.current.style.flex  = String(1 - fraction);
-            };
-            const onUp = () => {
-              window.removeEventListener('mousemove', onMove);
-              window.removeEventListener('mouseup', onUp);
-              redraw();
-            };
-            window.addEventListener('mousemove', onMove);
-            window.addEventListener('mouseup', onUp);
-          }}
+            }
+          )}
         />
         <div className="ruler">
           <div className="ruler-gutter" />
@@ -1064,26 +1048,14 @@ export default function App() {
           </div>
           <div
             className="tier-divider"
-            onMouseDown={(e) => {
-              e.preventDefault();
-              const startY = e.clientY;
-              const startWrd = wrdTierRef.current.offsetHeight;
-              const startPhn = phnTierRef.current.offsetHeight;
-              const total = startWrd + startPhn;
-              const onMove = (ev) => {
-                const delta = ev.clientY - startY;
-                const newWrd = Math.max(20, Math.min(total - 20, startWrd + delta));
-                wrdTierRef.current.style.flex = String(newWrd / total);
-                phnTierRef.current.style.flex = String((total - newWrd) / total);
-              };
-              const onUp = () => {
-                window.removeEventListener('mousemove', onMove);
-                window.removeEventListener('mouseup', onUp);
-                redraw();
-              };
-              window.addEventListener('mousemove', onMove);
-              window.addEventListener('mouseup', onUp);
-            }}
+            {...makeDragDivider(
+              (el) => el.closest('.tiers'),
+              (ev, rect) => {
+                const fraction = Math.max(0.1, Math.min(0.9, (ev.clientY - rect.top) / rect.height));
+                wrdTierRef.current.style.flex = String(fraction);
+                phnTierRef.current.style.flex = String(1 - fraction);
+              }
+            )}
           />
           <div className="tier" ref={phnTierRef}>
             <div className="tier-gutter">PHN</div>
