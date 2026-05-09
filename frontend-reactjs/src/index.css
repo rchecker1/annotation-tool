@@ -185,6 +185,14 @@ html, body {
 }
 .drop-overlay.active { opacity: 1; pointer-events: all; }
 
+/* ── Shortcut key input ── */
+.shortcut-input {
+  width: 80px; padding: 4px 8px; border-radius: 6px;
+  border: 1.5px solid #3a7bd5; background: #1e1e26;
+  color: #7aacf0; font-size: 11px; font-family: "JetBrains Mono", monospace;
+  text-align: center; outline: none; cursor: default;
+}
+
 /* ── Zoom slider ── */
 .zoom-row {
   display: flex; align-items: center; gap: 6px; margin-left: 4px;
