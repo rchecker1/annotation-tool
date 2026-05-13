@@ -203,6 +203,10 @@ export default function App() {
   const [editingShortcut, setEditingShortcut] = useState(false);
   const [showDashboard, setShowDashboard] = useState(false);
   const [playbackRate, setPlaybackRate]   = useState(1);
+  const [mfaRunning, setMfaRunning]       = useState(false);
+  const [mfaError, setMfaError]           = useState(null);   // string | null
+  const [mfaWordPicker, setMfaWordPicker] = useState(null);   // { words: WordItem[], sel } | null
+  const MFA_SERVER = 'http://localhost:5050';
   const playbackRateRef = useRef(1);
   const editShortcutRef = useRef('F1');
 
@@ -786,28 +790,35 @@ export default function App() {
     if (!audioBufferRef.current) return;
     stopAudio();
     const ctx = getAudioCtx();
-    const src = ctx.createBufferSource();
-    src.buffer = audioBufferRef.current;
-    src.connect(ctx.destination);
-    src.playbackRate.value = playbackRateRef.current;
-    const sel = selectionRef.current;
-    const to = sel ? sel.t1 : durationRef.current;
-    src.start(0, from, to - from);
-    src.onended = () => {
-      if (loopModeRef.current && sel && playingRef.current) { startPlay(sel.t0); return; }
-      stopAudio();
-      setPlaying(false);
-      clearOverlay();
-      updateTimeDisplay();
-      redraw();
+    const doStart = () => {
+      const src = ctx.createBufferSource();
+      src.buffer = audioBufferRef.current;
+      src.connect(ctx.destination);
+      src.playbackRate.value = playbackRateRef.current;
+      const sel = selectionRef.current;
+      const to = sel ? sel.t1 : durationRef.current;
+      src.start(0, from, to - from);
+      src.onended = () => {
+        if (loopModeRef.current && sel && playingRef.current) { startPlay(sel.t0); return; }
+        stopAudio();
+        setPlaying(false);
+        clearOverlay();
+        updateTimeDisplay();
+        redraw();
+      };
+      audioSourceRef.current = src;
+      playStartCtxRef.current = ctx.currentTime;
+      playStartAtRef.current = from;
+      playEndAtRef.current = to;
+      playingRef.current = true;
+      setPlaying(true);
+      rafIdRef.current = requestAnimationFrame(tick);
     };
-    audioSourceRef.current = src;
-    playStartCtxRef.current = ctx.currentTime;
-    playStartAtRef.current = from;
-    playEndAtRef.current = to;
-    playingRef.current = true;
-    setPlaying(true);
-    rafIdRef.current = requestAnimationFrame(tick);
+    if (ctx.state === 'suspended') {
+      ctx.resume().then(doStart);
+    } else {
+      doStart();
+    }
   }, [stopAudio, tick, clearOverlay, redraw, updateTimeDisplay]);
 
   // ── Data loading ──────────────────────────────────────────────────────
@@ -1429,6 +1440,200 @@ export default function App() {
     redraw();
   }, [labelEditor, redraw]);
 
+  // ── MFA alignment ─────────────────────────────────────────────────────────
+
+  /**
+   * Merge MFA phone intervals into the phoneme tier.
+   *
+   * Strategy:
+   *   - Remove every existing phone that is fully contained within [segT0, segT1].
+   *   - Clamp phones that partially overlap the segment boundary so they don't
+   *     extend outside the segment (shouldn't happen after server validation,
+   *     but belt-and-suspenders).
+   *   - Filter out empty-label MFA silences unless they are the only interval.
+   *   - Assign fresh ids and re-run assignRows.
+   *
+   * Returns the merged, row-assigned phone array.
+   */
+  const applyMfaResult = useCallback((mfaPhones, segT0, segT1) => {
+    // ── Input assertions ────────────────────────────────────────────────────
+    if (!Array.isArray(mfaPhones))
+      throw new Error('applyMfaResult: mfaPhones must be an array');
+    if (segT1 <= segT0)
+      throw new Error(`applyMfaResult: invalid segment [${segT0}, ${segT1}]`);
+
+    const DUR = durationRef.current;
+    if (segT0 < 0 || segT1 > DUR + 1e-6)
+      throw new Error(`applyMfaResult: segment [${segT0}, ${segT1}] outside file duration ${DUR}`);
+
+    // Validate each phone coming in
+    for (const ph of mfaPhones) {
+      if (typeof ph.t0 !== 'number' || typeof ph.t1 !== 'number')
+        throw new Error(`applyMfaResult: phone has non-numeric timestamps: ${JSON.stringify(ph)}`);
+      if (ph.t1 - ph.t0 < -1e-6)
+        throw new Error(`applyMfaResult: negative-duration phone [${ph.t0}, ${ph.t1}] '${ph.text}'`);
+    }
+
+    // ── Remove existing phones fully inside the segment ─────────────────────
+    const kept = phonesRef.current.filter(p => {
+      const fullyInside = p.t0 >= segT0 - 1e-6 && p.t1 <= segT1 + 1e-6;
+      return !fullyInside;
+    });
+
+    // ── Build new phone items from MFA output ───────────────────────────────
+    const newPhones = mfaPhones
+      .filter(ph => ph.text && ph.text.trim() !== '')   // drop silence intervals
+      .filter(ph => ph.t1 - ph.t0 > 1e-4)              // drop zero-duration
+      .map(ph => ({
+        id:   nextId(),
+        t0:   Math.max(segT0, ph.t0),
+        t1:   Math.min(segT1, ph.t1),
+        text: ph.text.trim(),
+        row:  0,
+      }));
+
+    if (newPhones.length === 0)
+      throw new Error('MFA returned no non-silent phones for this segment — alignment may have failed');
+
+    // ── Overlap guard: if any new phone overlaps a kept phone, warn ─────────
+    for (const np of newPhones) {
+      for (const kp of kept) {
+        const overlaps = np.t0 < kp.t1 - 1e-6 && np.t1 > kp.t0 + 1e-6;
+        if (overlaps) {
+          // Clamp kept phone to not overlap with MFA result
+          // (MFA result takes priority within the selected segment)
+          console.warn(
+            `MFA phone [${np.t0.toFixed(3)}, ${np.t1.toFixed(3)}] '${np.text}' ` +
+            `overlaps existing phone [${kp.t0.toFixed(3)}, ${kp.t1.toFixed(3)}] '${kp.text}' — ` +
+            `existing phone will be trimmed`
+          );
+        }
+      }
+    }
+
+    // Trim kept phones that partially overlap the segment boundary
+    const trimmed = kept.map(p => {
+      if (p.t1 > segT0 && p.t0 < segT0) return { ...p, t1: segT0 };  // overlaps left edge
+      if (p.t0 < segT1 && p.t1 > segT1) return { ...p, t0: segT1 };  // overlaps right edge
+      return p;
+    }).filter(p => p.t1 - p.t0 > 1e-4); // drop now-zero-width items
+
+    const merged = assignRows([...trimmed, ...newPhones]);
+    return merged;
+  }, []);
+
+  /**
+   * Check the current selection, find overlapping words, and either:
+   *   - Run MFA directly if exactly one non-overlapping word covers the selection, OR
+   *   - Show a word-picker modal if multiple words overlap (user chooses which one).
+   *
+   * The selected segment is used as the audio region AND as the time bounds passed
+   * to the server.  The word labels inside that segment become the transcript.
+   */
+  const runMfaForWords = useCallback(async (targetWords) => {
+    const sel = selectionRef.current;
+    if (!sel) { setMfaError('Make a selection first'); return; }
+    if (!audioBufferRef.current) { setMfaError('No audio loaded'); return; }
+    if (!targetWords || targetWords.length === 0) { setMfaError('No words in selection'); return; }
+
+    setMfaRunning(true);
+    setMfaError(null);
+
+    try {
+      const buf  = audioBufferRef.current;
+      const sr   = buf.sampleRate;
+      const segT0 = sel.t0;
+      const segT1 = sel.t1;
+
+      if (segT1 - segT0 < 0.05)
+        throw new Error('Selection is too short (< 50 ms) to align');
+
+      // Slice the channel data for this segment
+      const startSample = Math.max(0, Math.floor(segT0 * sr));
+      const endSample   = Math.min(buf.length, Math.ceil(segT1 * sr));
+      const ch = buf.getChannelData(0).slice(startSample, endSample);
+
+      if (ch.length === 0)
+        throw new Error('No audio samples in the selected region');
+
+      // Build transcript string from the target words (preserving order)
+      const sorted = [...targetWords].sort((a, b) => a.t0 - b.t0);
+      const transcript = sorted.map(w => w.text.trim()).filter(Boolean).join(' ');
+
+      if (!transcript)
+        throw new Error('Selected words have no text — cannot align empty transcript');
+
+      // Health-check the server first so the error is clear
+      let serverOk = false;
+      try {
+        const hResp = await fetch(`${MFA_SERVER}/health`, { signal: AbortSignal.timeout(3000) });
+        serverOk = hResp.ok;
+      } catch(_) { /* fall through */ }
+
+      if (!serverOk)
+        throw new Error(
+          `Cannot reach MFA server at ${MFA_SERVER}.\n` +
+          `Start it with:\n  cd code && python mfa_server.py`
+        );
+
+      // Spin up the worker
+      const result = await new Promise((resolve, reject) => {
+        const worker = new Worker(new URL('./mfaWorker.js', import.meta.url), { type: 'module' });
+        worker.onmessage = ({ data: res }) => { worker.terminate(); resolve(res); };
+        worker.onerror   = (err) => { worker.terminate(); reject(new Error(err.message)); };
+        worker.postMessage(
+          { ch, sr, t0: segT0, t1: segT1, words: transcript, serverUrl: MFA_SERVER },
+          [ch.buffer]
+        );
+      });
+
+      if (!result.ok)
+        throw new Error(result.error);
+
+      // Apply — this also validates
+      pushUndo();
+      const merged = applyMfaResult(result.phones, segT0, segT1);
+      phonesRef.current = merged;
+      setPhones([...merged]);
+      redraw();
+
+    } catch (err) {
+      setMfaError(err.message || String(err));
+    } finally {
+      setMfaRunning(false);
+    }
+  }, [applyMfaResult, pushUndo, redraw]);
+
+  /**
+   * Entry point called by the "Run MFA" button.
+   * Finds words overlapping the selection, handles the overlap case.
+   */
+  const handleRunMfa = useCallback(() => {
+    const sel = selectionRef.current;
+    if (!sel) { setMfaError('Make a time selection first, then click Run MFA'); return; }
+
+    const overlapping = wordsRef.current.filter(
+      w => w.text && w.text.trim() && w.t0 < sel.t1 - 1e-6 && w.t1 > sel.t0 + 1e-6
+    );
+
+    if (overlapping.length === 0) {
+      setMfaError('No labeled words overlap the selection — add word annotations first');
+      return;
+    }
+
+    // If there are overlapping rows (stacked words covering the same time), ask the user
+    // which word they want to process. Otherwise, use all overlapping words directly.
+    const hasOverlappingRows = overlapping.some((w, _, arr) =>
+      arr.some(other => other.id !== w.id && other.t0 < w.t1 - 1e-6 && other.t1 > w.t0 + 1e-6)
+    );
+
+    if (hasOverlappingRows) {
+      setMfaWordPicker({ words: overlapping, sel });
+    } else {
+      runMfaForWords(overlapping);
+    }
+  }, [runMfaForWords]);
+
   // ── Drag-to-resize helper ─────────────────────────────────────────────
   const makeDragDivider = (getContainer, onMove) => ({
     onMouseDown: (e) => {
@@ -1573,6 +1778,14 @@ export default function App() {
         >
           ◎ Scores
         </button>
+        <button
+          className={`btn btn-mfa${mfaRunning ? ' computing' : ''}`}
+          onClick={handleRunMfa}
+          disabled={mfaRunning}
+          title="Run Montreal Forced Aligner on the current selection"
+        >
+          {mfaRunning ? '⟳ MFA…' : '⚙ Run MFA'}
+        </button>
         <button className="btn" onClick={exportTextGrid} title="Export TextGrid">
           ↓ Export
         </button>
@@ -1714,6 +1927,107 @@ export default function App() {
           </>
         )}
       </div>
+
+      {/* ── MFA error banner ─────────────────────────────────────────────── */}
+      {mfaError && (
+        <div
+          style={{
+            position: 'fixed', bottom: 28, left: '50%', transform: 'translateX(-50%)',
+            background: '#2a1010', border: '1px solid #a03030', borderRadius: 8,
+            padding: '10px 16px', zIndex: 8000, maxWidth: 560, minWidth: 280,
+            fontFamily: 'Inter,system-ui,sans-serif', fontSize: 12, color: '#f08080',
+            display: 'flex', alignItems: 'flex-start', gap: 10,
+            boxShadow: '0 4px 20px rgba(0,0,0,0.6)',
+          }}
+        >
+          <span style={{ flexShrink: 0, fontSize: 16 }}>⚠</span>
+          <pre style={{ margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word', flex: 1, fontSize: 11 }}>
+            {mfaError}
+          </pre>
+          <button
+            onClick={() => setMfaError(null)}
+            style={{
+              background: 'none', border: 'none', color: '#f08080', cursor: 'pointer',
+              fontSize: 16, padding: '0 0 0 8px', flexShrink: 0, lineHeight: 1,
+            }}
+            title="Dismiss"
+          >×</button>
+        </div>
+      )}
+
+      {/* ── MFA word-picker modal (shown when words overlap in the selection) */}
+      {mfaWordPicker && (
+        <div
+          style={{
+            position: 'fixed', inset: 0, zIndex: 9000,
+            background: 'rgba(0,0,0,0.65)', display: 'flex',
+            alignItems: 'center', justifyContent: 'center',
+          }}
+          onClick={(e) => { if (e.target === e.currentTarget) setMfaWordPicker(null); }}
+        >
+          <div style={{
+            background: '#1e1e26', border: '1px solid #2e2e3a', borderRadius: 10,
+            padding: '20px 24px', minWidth: 340, maxWidth: 500,
+            boxShadow: '0 8px 32px rgba(0,0,0,0.7)',
+            fontFamily: 'Inter,system-ui,sans-serif',
+          }}>
+            <div style={{ fontSize: 13, fontWeight: 600, color: '#e8e6e1', marginBottom: 6 }}>
+              Overlapping words in selection
+            </div>
+            <div style={{ fontSize: 11, color: '#6b6a65', marginBottom: 16, lineHeight: 1.5 }}>
+              Multiple words overlap in this region. Select which word(s) to align with MFA,
+              or click "All" to align them together.
+            </div>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 16 }}>
+              {mfaWordPicker.words.map(w => (
+                <button
+                  key={w.id}
+                  onClick={() => {
+                    setMfaWordPicker(null);
+                    runMfaForWords([w]);
+                  }}
+                  style={{
+                    background: '#13131a', border: '1px solid #2e2e3a', borderRadius: 6,
+                    padding: '8px 12px', color: '#c8c6c1', fontSize: 12,
+                    fontFamily: 'Inter,system-ui,sans-serif', cursor: 'pointer',
+                    textAlign: 'left', display: 'flex', justifyContent: 'space-between',
+                    alignItems: 'center',
+                  }}
+                  onMouseEnter={e => e.currentTarget.style.background = '#2e2e3a'}
+                  onMouseLeave={e => e.currentTarget.style.background = '#13131a'}
+                >
+                  <span style={{ fontWeight: 600, fontSize: 13 }}>{w.text || '<empty>'}</span>
+                  <span style={{
+                    fontSize: 10, fontFamily: "'JetBrains Mono',monospace", color: '#6b6a65',
+                  }}>
+                    {w.t0.toFixed(3)}s – {w.t1.toFixed(3)}s
+                  </span>
+                </button>
+              ))}
+            </div>
+
+            <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+              <button
+                className="btn"
+                onClick={() => setMfaWordPicker(null)}
+              >
+                Cancel
+              </button>
+              <button
+                className="btn btn-mfa"
+                onClick={() => {
+                  const words = mfaWordPicker.words;
+                  setMfaWordPicker(null);
+                  runMfaForWords(words);
+                }}
+              >
+                Align all
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </>
   );
 }

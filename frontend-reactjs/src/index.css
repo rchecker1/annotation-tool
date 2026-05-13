@@ -203,6 +203,14 @@ html, body {
 }
 input[type="range"] { width: 90px; accent-color: #3a7bd5; cursor: pointer; }
 
+/* ── MFA button ── */
+.btn-mfa {
+  background: #1e2e1e; color: #7fcf7f; border-color: rgba(80,180,80,0.45);
+}
+.btn-mfa:hover { background: rgba(60,160,60,0.25); color: #a0e8a0; border-color: #50b450; }
+.btn-mfa.computing { color: #f0c070; border-color: rgba(240,192,112,0.5); cursor: wait; }
+.btn-mfa:disabled { pointer-events: none; opacity: 0.7; }
+
 /* ── Colormap selector ── */
 .colormap-select {
   padding: 4px 8px; border-radius: 6px; border: 1px solid #2e2e36;
