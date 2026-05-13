@@ -12,7 +12,19 @@ const BUNDLED_TG  = 'Bluey_blueyp1aud_region280%E2%80%93350s_original.TextGrid';
 let _nextId = 1;
 const nextId = () => _nextId++;
 
-// Assign stable ids and compute stacking rows for overlapping items
+function scoreColor(score, alpha = 1) {
+  const r = score < 0.5 ? 255 : Math.round(255 * (1 - (score - 0.5) * 2));
+  const g = score > 0.5 ? 200 : Math.round(200 * score * 2);
+  return alpha < 1 ? `rgba(${r},${g},50,${alpha})` : `rgb(${r},${g},50)`;
+}
+
+function pixelsToCanvas(res) {
+  const oc = document.createElement('canvas');
+  oc.width = res.pw; oc.height = res.ph;
+  oc.getContext('2d').putImageData(new ImageData(res.pixels, res.pw, res.ph), 0, 0);
+  return oc;
+}
+
 function assignRows(items) {
   const sorted = [...items].sort((a, b) => a.t0 - b.t0);
   const rows = []; // rows[r] = end time of last item in row r
@@ -29,7 +41,6 @@ function withIds(items) {
   return items.map(it => ({ ...it, id: it.id ?? nextId(), row: 0 }));
 }
 
-// Serialize items back to Praat TextGrid format
 function serializeTextGrid(duration, wordItems, phoneItems) {
   const tierData = [
     { name: 'words', items: wordItems },
@@ -48,7 +59,6 @@ function serializeTextGrid(duration, wordItems, phoneItems) {
   ];
 
   tierData.forEach(({ name, items }, ti) => {
-    // Build full interval list including empty gaps
     const sorted = [...items].sort((a, b) => a.t0 - b.t0);
     const intervals = [];
     let cursor = 0;
@@ -98,14 +108,7 @@ function ConfidenceDashboard({ words }) {
   const bins = Array(10).fill(0);
   for (const s of scores) bins[Math.min(9, Math.floor(s * 10))]++;
   const maxBin = Math.max(...bins);
-
-  const scoreColor = (score) => {
-    const r = score < 0.5 ? 255 : Math.round(255 * (1 - (score - 0.5) * 2));
-    const g = score > 0.5 ? 200 : Math.round(200 * score * 2);
-    return `rgb(${r},${g},50)`;
-  };
-
-  const low = scored.slice(0, Math.min(5, scored.length));
+  const low = scored.slice(0, 5);
 
   return (
     <div style={dashStyle}>
@@ -134,12 +137,10 @@ function ConfidenceDashboard({ words }) {
           const pct = maxBin > 0 ? count / maxBin : 0;
           const midScore = (i + 0.5) / 10;
           return (
-            <div key={i} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 1 }}>
-              <div style={{
-                width: '100%', height: Math.max(2, pct * 52),
-                background: scoreColor(midScore), borderRadius: '2px 2px 0 0', opacity: 0.85,
-              }} title={`${(i * 0.1).toFixed(1)}–${((i+1)*0.1).toFixed(1)}: ${count}`} />
-            </div>
+            <div key={i} style={{
+              flex: 1, height: Math.max(2, pct * 52),
+              background: scoreColor(midScore), borderRadius: '2px 2px 0 0', opacity: 0.85,
+            }} title={`${(i * 0.1).toFixed(1)}–${((i+1)*0.1).toFixed(1)}: ${count}`} />
           );
         })}
       </div>
@@ -502,7 +503,6 @@ export default function App() {
     }
   }, [tX]);
 
-  // drawTier supports multi-row stacking for overlapping items
   const drawTier = useCallback((canvas, items, isWord) => {
     const s = setupCanvas(canvas);
     if (!s) return;
@@ -525,13 +525,6 @@ export default function App() {
     const font        = isWord ? "500 12px Inter,sans-serif" : "11px 'JetBrains Mono',monospace";
     const hoverEdge   = hoverEdgeRef.current;
 
-    // Red(0)→Yellow(0.5)→Green(1) gradient for confidence scores
-    const scoreColor = (score, alpha) => {
-      const r = score < 0.5 ? 255 : Math.round(255 * (1 - (score - 0.5) * 2));
-      const g = score > 0.5 ? 200 : Math.round(200 * score * 2);
-      return `rgba(${r},${g},50,${alpha})`;
-    };
-
     for (const item of items) {
       if (item.t1 < t0 || item.t0 > t1) continue;
       const x0 = Math.max(0, tX(item.t0, w));
@@ -550,7 +543,6 @@ export default function App() {
       ctx.strokeStyle = stroke; ctx.lineWidth = inEdit ? 1.5 : 1;
       ctx.strokeRect(x0 + 0.5, ry + 2.5, bw - 1, rowH - 5);
 
-      // Highlight hovered edge handles in edit mode
       if (inEdit) {
         const isHovered = hoverEdge && hoverEdge.id === item.id;
         if (isHovered) {
@@ -580,14 +572,7 @@ export default function App() {
     const { t0, t1 } = viewRef.current;
     ctx.fillStyle = '#0c0c0f'; ctx.fillRect(0, 0, w, h);
     for (const wd of wordsRef.current) {
-      if (wd.score != null) {
-        const s = wd.score;
-        const r = s < 0.5 ? 255 : Math.round(255 * (1 - (s - 0.5) * 2));
-        const g = s > 0.5 ? 200 : Math.round(200 * s * 2);
-        ctx.fillStyle = `rgba(${r},${g},50,0.55)`;
-      } else {
-        ctx.fillStyle = 'rgba(58,123,213,0.3)';
-      }
+      ctx.fillStyle = wd.score != null ? scoreColor(wd.score, 0.55) : 'rgba(58,123,213,0.3)';
       ctx.fillRect((wd.t0 / DUR) * w, 3, Math.max(1, ((wd.t1 - wd.t0) / DUR) * w), h - 6);
     }
     const vx0 = (t0 / DUR) * w, vx1 = (t1 / DUR) * w;
@@ -620,8 +605,7 @@ export default function App() {
       ctx.strokeStyle = '#e05a3a'; ctx.lineWidth = 1.5;
       ctx.beginPath(); ctx.moveTo(px, 0); ctx.lineTo(px, th); ctx.stroke();
     }
-    drawMinimap();
-  }, [tX, drawMinimap]);
+  }, [tX]);
 
   const clearOverlay = useCallback(() => {
     const ov = overlayCanvasRef.current;
@@ -656,10 +640,7 @@ export default function App() {
     worker.onmessage = ({ data: res }) => {
       worker.terminate();
       baseSpecWorkerRef.current = null;
-      const oc = document.createElement('canvas');
-      oc.width = res.pw; oc.height = res.ph;
-      oc.getContext('2d').putImageData(new ImageData(res.pixels, res.pw, res.ph), 0, 0);
-      baseSpecCacheRef.current = { canvas: oc, stripT0: 0, stripT1: DUR, stripPw: res.pw };
+      baseSpecCacheRef.current = { canvas: pixelsToCanvas(res), stripT0: 0, stripT1: DUR, stripPw: res.pw };
       drawSpec();
     };
 
@@ -715,10 +696,7 @@ export default function App() {
     worker.onmessage = ({ data: res }) => {
       worker.terminate();
       specWorkerRef.current = null;
-      const oc = document.createElement('canvas');
-      oc.width = res.pw; oc.height = res.ph;
-      oc.getContext('2d').putImageData(new ImageData(res.pixels, res.pw, res.ph), 0, 0);
-      spectroCacheRef.current = { canvas: oc, ph, stripT0, stripT1, stripPw };
+      spectroCacheRef.current = { canvas: pixelsToCanvas(res), ph, stripT0, stripT1, stripPw };
       setSpecComputing(false);
       drawSpec();
     };
@@ -814,7 +792,7 @@ export default function App() {
     src.playbackRate.value = playbackRateRef.current;
     const sel = selectionRef.current;
     const to = sel ? sel.t1 : durationRef.current;
-    src.start(0, from, (to - from) / playbackRateRef.current);
+    src.start(0, from, to - from);
     src.onended = () => {
       if (loopModeRef.current && sel && playingRef.current) { startPlay(sel.t0); return; }
       stopAudio();
@@ -856,10 +834,10 @@ export default function App() {
       spectroCacheRef.current = { canvas: null };
       baseSpecCacheRef.current = { canvas: null };
       calcBaseSpec(buffer);
-      setTimeout(() => {
-        formantTrackRef.current = buildFormantTrack(buffer);
-        redraw();
-      }, 50);
+    }, 50);
+    setTimeout(() => {
+      formantTrackRef.current = buildFormantTrack(buffer);
+      redraw();
     }, 50);
   }, [redraw]);
 
@@ -903,7 +881,7 @@ export default function App() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  useEffect(() => { redraw(); }, [redraw, words, phones, duration]);
+  useEffect(() => { redraw(); }, [redraw]);
 
   useEffect(() => {
     const el = document.getElementById('root');
@@ -1071,18 +1049,18 @@ export default function App() {
   useEffect(() => {
     const cv = minimapCanvasRef.current;
     if (!cv) return;
-    const pan = (x) => {
-      const rect = cv.getBoundingClientRect();
+    const pan = (x, rectWidth) => {
       const { t0, t1 } = viewRef.current;
       const span = t1 - t0, DUR = durationRef.current;
-      const t = (Math.max(0, Math.min(rect.width, x)) / rect.width) * DUR;
+      const t = (Math.max(0, Math.min(rectWidth, x)) / rectWidth) * DUR;
       const newT0 = Math.max(0, Math.min(DUR - span, t - span/2));
       viewRef.current = { t0: newT0, t1: newT0 + span };
       redraw();
     };
     const onDown = (e) => {
-      pan(e.clientX - cv.getBoundingClientRect().left);
-      const onMove = (ev) => pan(ev.clientX - cv.getBoundingClientRect().left);
+      const rect = cv.getBoundingClientRect();
+      pan(e.clientX - rect.left, rect.width);
+      const onMove = (ev) => pan(ev.clientX - rect.left, rect.width);
       const onUp = () => { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp); };
       window.addEventListener('mousemove', onMove);
       window.addEventListener('mouseup', onUp);
@@ -1092,12 +1070,13 @@ export default function App() {
   }, [redraw]);
 
   // Token hover popup (only in select mode)
-  const addHover = useCallback((canvas, items) => {
+  const addHover = useCallback((canvas, isWord) => {
     if (!canvas) return () => {};
     const onMove = (e) => {
       if (editModeRef.current) { setPopup(null); return; }
       const rect = canvas.getBoundingClientRect();
       const t = xT(e.clientX - rect.left, rect.width);
+      const items = isWord ? wordsRef.current : phonesRef.current;
       const item = items.find(it => t >= it.t0 && t <= it.t1);
       if (!item) { setPopup(null); return; }
       let left = e.clientX - 80, top = rect.top - 62;
@@ -1115,10 +1094,10 @@ export default function App() {
   }, [xT]);
 
   useEffect(() => {
-    const c1 = addHover(wordsCanvasRef.current, wordsRef.current);
-    const c2 = addHover(phonesCanvasRef.current, phonesRef.current);
+    const c1 = addHover(wordsCanvasRef.current, true);
+    const c2 = addHover(phonesCanvasRef.current, false);
     return () => { c1(); c2(); };
-  }, [addHover, words, phones]);
+  }, [addHover]);
 
   // ── Edit mode interactions ─────────────────────────────────────────────
   // Returns hit info: { item, side: 'left'|'right'|'body'|null, isWord }
@@ -1147,8 +1126,14 @@ export default function App() {
     return null;
   }, [xT]);
 
-  const addTierEditInteraction = useCallback((canvas, itemsRef, isWord, otherItemsRef) => {
+  const addTierEditInteraction = useCallback((canvas, itemsRef, isWord) => {
     if (!canvas) return () => {};
+
+    const commitItems = (updated) => {
+      itemsRef.current = updated;
+      if (isWord) { wordsRef.current = updated; setWords([...updated]); }
+      else        { phonesRef.current = updated; setPhones([...updated]); }
+    };
 
     const onMouseMove = (e) => {
       if (!editModeRef.current) return;
@@ -1176,7 +1161,6 @@ export default function App() {
     };
 
     const onMouseDown = (e) => {
-      // Select mode: seek / drag-select
       if (!editModeRef.current) {
         const rect = canvas.getBoundingClientRect();
         const startT = xT(e.clientX - rect.left, rect.width);
@@ -1221,10 +1205,7 @@ export default function App() {
           const newItem = { id: nextId(), t0: Math.max(0, t - span), t1: Math.min(DUR, t + span), text: '', row: 0 };
           pushUndo();
           const updated = assignRows([...items, newItem]);
-          itemsRef.current = updated;
-          if (isWord) { wordsRef.current = updated; setWords([...updated]); }
-          else        { phonesRef.current = updated; setPhones([...updated]); }
-          // Open label editor immediately
+          commitItems(updated);
           const x0 = tX(newItem.t0, rect.width) + rect.left;
           const x1 = tX(newItem.t1, rect.width) + rect.left;
           setLabelEditor({ id: newItem.id, isWord, text: '', x: (x0 + x1) / 2, y: e.clientY, boxW: Math.max(80, x1 - x0) });
@@ -1235,7 +1216,6 @@ export default function App() {
 
       const { item, side } = hit;
 
-      // Double-click on item: rename
       if (e.detail === 2) {
         const x0 = tX(item.t0, rect.width) + rect.left;
         const x1 = tX(item.t1, rect.width) + rect.left;
@@ -1243,16 +1223,13 @@ export default function App() {
         return;
       }
 
-      // Right-click: context menu handled via onContextMenu
       if (e.button === 2) return;
 
       pushUndo();
 
       if (side === 'left' || side === 'right') {
-        // Drag boundary — also update adjacent item that shares this edge
         const startX = e.clientX;
         const startT = side === 'left' ? item.t0 : item.t1;
-        // Find neighbour sharing this edge
         const neighbour = items.find(it =>
           it.id !== item.id && it.row === item.row &&
           Math.abs((side === 'left' ? it.t1 : it.t0) - startT) < 1e-6
@@ -1273,9 +1250,7 @@ export default function App() {
             if (neighbour && it.id === neighbour.id) return { ...it, [side === 'left' ? 't1' : 't0']: newT };
             return it;
           });
-          itemsRef.current = updated;
-          if (isWord) { wordsRef.current = updated; setWords([...updated]); }
-          else        { phonesRef.current = updated; setPhones([...updated]); }
+          commitItems(updated);
           drawTier(canvas, updated, isWord);
         };
         const onUp = () => {
@@ -1288,7 +1263,6 @@ export default function App() {
         window.addEventListener('mouseup', onUp);
 
       } else if (side === 'body') {
-        // Drag body — move entire item
         const startX = e.clientX;
         const origT0 = item.t0, origT1 = item.t1;
         const width = origT1 - origT0;
@@ -1301,9 +1275,7 @@ export default function App() {
             it.id === item.id ? { ...it, t0: newT0, t1: newT0 + width } : it
           );
           const withRows = assignRows(updated);
-          itemsRef.current = withRows;
-          if (isWord) { wordsRef.current = withRows; setWords([...withRows]); }
-          else        { phonesRef.current = withRows; setPhones([...withRows]); }
+          commitItems(withRows);
           drawTier(canvas, withRows, isWord);
         };
         const onUp = () => {
@@ -1325,7 +1297,6 @@ export default function App() {
       if (!hit) return;
       const { item } = hit;
 
-      // Build and show a context menu
       const existing = document.getElementById('tier-ctx-menu');
       if (existing) existing.remove();
 
@@ -1362,10 +1333,7 @@ export default function App() {
         if (!next) return;
         pushUndo();
         const merged = { ...item, t1: next.t1, text: item.text + ' ' + next.text };
-        const updated = assignRows(itemsRef.current.filter(it => it.id !== next.id).map(it => it.id === item.id ? merged : it));
-        itemsRef.current = updated;
-        if (isWord) { wordsRef.current = updated; setWords([...updated]); }
-        else        { phonesRef.current = updated; setPhones([...updated]); }
+        commitItems(assignRows(itemsRef.current.filter(it => it.id !== next.id).map(it => it.id === item.id ? merged : it)));
         redraw();
       });
 
@@ -1375,10 +1343,7 @@ export default function App() {
 
       menuItem('Delete', () => {
         pushUndo();
-        const updated = assignRows(itemsRef.current.filter(it => it.id !== item.id));
-        itemsRef.current = updated;
-        if (isWord) { wordsRef.current = updated; setWords([...updated]); }
-        else        { phonesRef.current = updated; setPhones([...updated]); }
+        commitItems(assignRows(itemsRef.current.filter(it => it.id !== item.id)));
         redraw();
       });
 
@@ -1401,8 +1366,8 @@ export default function App() {
   }, [hitTest, tX, xT, drawTier, redraw, pushUndo]);
 
   useEffect(() => {
-    const c1 = addTierEditInteraction(wordsCanvasRef.current,  wordsRef,  true,  phonesRef);
-    const c2 = addTierEditInteraction(phonesCanvasRef.current, phonesRef, false, wordsRef);
+    const c1 = addTierEditInteraction(wordsCanvasRef.current,  wordsRef,  true);
+    const c2 = addTierEditInteraction(phonesCanvasRef.current, phonesRef, false);
     return () => { c1(); c2(); };
   }, [addTierEditInteraction, words, phones]);
 
@@ -1520,7 +1485,7 @@ export default function App() {
         <div className="logo">Annotation Viewer <span>Bluey · 280–350s</span></div>
         <div className="spacer" />
         <div className="transport">
-          <button className={`btn${loopMode ? ' active' : ''}`} onClick={() => { loopModeRef.current = !loopMode; setLoopMode(lm => !lm); }} title="Loop selection (L)">
+          <button className={`btn${loopMode ? ' active' : ''}`} onClick={() => { const n = !loopModeRef.current; loopModeRef.current = n; setLoopMode(n); }} title="Loop selection (L)">
             ⟲ Loop
           </button>
           <button
