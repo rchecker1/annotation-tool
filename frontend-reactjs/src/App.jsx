@@ -76,6 +76,112 @@ function serializeTextGrid(duration, wordItems, phoneItems) {
   return lines.join('\n');
 }
 
+function ConfidenceDashboard({ words }) {
+  const scored = words.filter(w => w.score != null).sort((a, b) => a.score - b.score);
+  if (scored.length === 0) {
+    return (
+      <div style={dashStyle}>
+        <div style={{ color: '#6b6a65', fontSize: 12, padding: 16, textAlign: 'center' }}>
+          No score data in this TextGrid
+        </div>
+      </div>
+    );
+  }
+
+  const scores = scored.map(w => w.score);
+  const mean = scores.reduce((a, b) => a + b, 0) / scores.length;
+  const median = scores[Math.floor(scores.length / 2)];
+  const min = scores[0];
+  const max = scores[scores.length - 1];
+
+  // Build 10-bin histogram
+  const bins = Array(10).fill(0);
+  for (const s of scores) bins[Math.min(9, Math.floor(s * 10))]++;
+  const maxBin = Math.max(...bins);
+
+  const scoreColor = (score) => {
+    const r = score < 0.5 ? 255 : Math.round(255 * (1 - (score - 0.5) * 2));
+    const g = score > 0.5 ? 200 : Math.round(200 * score * 2);
+    return `rgb(${r},${g},50)`;
+  };
+
+  const low = scored.slice(0, Math.min(5, scored.length));
+
+  return (
+    <div style={dashStyle}>
+      <div style={{ fontSize: 11, fontWeight: 600, color: '#e8e6e1', marginBottom: 10, letterSpacing: 0.5 }}>
+        CONFIDENCE SCORES
+      </div>
+
+      {/* Stats */}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '4px 8px', marginBottom: 12 }}>
+        {[['Mean', mean], ['Median', median], ['Min', min], ['Max', max]].map(([label, val]) => (
+          <div key={label} style={{ background: '#1e1e26', borderRadius: 4, padding: '4px 6px' }}>
+            <div style={{ fontSize: 9, color: '#6b6a65', fontFamily: "'JetBrains Mono',monospace" }}>{label}</div>
+            <div style={{ fontSize: 13, color: scoreColor(val), fontFamily: "'JetBrains Mono',monospace", fontWeight: 600 }}>
+              {val.toFixed(3)}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* Histogram */}
+      <div style={{ fontSize: 9, color: '#6b6a65', fontFamily: "'JetBrains Mono',monospace", marginBottom: 4 }}>
+        DISTRIBUTION ({scored.length} words)
+      </div>
+      <div style={{ display: 'flex', alignItems: 'flex-end', gap: 2, height: 60, marginBottom: 4 }}>
+        {bins.map((count, i) => {
+          const pct = maxBin > 0 ? count / maxBin : 0;
+          const midScore = (i + 0.5) / 10;
+          return (
+            <div key={i} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 1 }}>
+              <div style={{
+                width: '100%', height: Math.max(2, pct * 52),
+                background: scoreColor(midScore), borderRadius: '2px 2px 0 0', opacity: 0.85,
+              }} title={`${(i * 0.1).toFixed(1)}–${((i+1)*0.1).toFixed(1)}: ${count}`} />
+            </div>
+          );
+        })}
+      </div>
+      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 8, color: '#45454d', fontFamily: "'JetBrains Mono',monospace", marginBottom: 12 }}>
+        <span>0.0</span><span>0.5</span><span>1.0</span>
+      </div>
+
+      {/* Color legend */}
+      <div style={{ fontSize: 9, color: '#6b6a65', fontFamily: "'JetBrains Mono',monospace", marginBottom: 4 }}>LEGEND</div>
+      <div style={{
+        height: 8, borderRadius: 4, marginBottom: 4,
+        background: 'linear-gradient(to right, rgb(255,0,50), rgb(255,200,50), rgb(0,200,50))',
+      }} />
+      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 8, color: '#45454d', fontFamily: "'JetBrains Mono',monospace", marginBottom: 14 }}>
+        <span>Low</span><span>High</span>
+      </div>
+
+      {/* Low confidence words */}
+      <div style={{ fontSize: 9, color: '#6b6a65', fontFamily: "'JetBrains Mono',monospace", marginBottom: 4 }}>
+        LOWEST CONFIDENCE
+      </div>
+      {low.map(w => (
+        <div key={w.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '3px 0', borderBottom: '1px solid #1e1e24' }}>
+          <span style={{ fontSize: 12, color: '#c8c6c1', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 120 }}>
+            {w.text || '<empty>'}
+          </span>
+          <span style={{ fontSize: 11, fontFamily: "'JetBrains Mono',monospace", color: scoreColor(w.score), flexShrink: 0, marginLeft: 6 }}>
+            {w.score.toFixed(3)}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+const dashStyle = {
+  width: 200, flexShrink: 0,
+  background: '#13131a', borderLeft: '1px solid #1e1e24',
+  overflowY: 'auto', padding: '14px 12px',
+  fontFamily: 'Inter,system-ui,sans-serif',
+};
+
 export default function App() {
   // ── React state (drives toolbar UI only) ──────────────────────────────
   const [words, setWords]               = useState([]);
@@ -94,6 +200,9 @@ export default function App() {
   const [labelEditor, setLabelEditor]   = useState(null); // { id, isWord, text, x, y, w }
   const [editShortcut, setEditShortcut] = useState('F1');
   const [editingShortcut, setEditingShortcut] = useState(false);
+  const [showDashboard, setShowDashboard] = useState(false);
+  const [playbackRate, setPlaybackRate]   = useState(1);
+  const playbackRateRef = useRef(1);
   const editShortcutRef = useRef('F1');
 
   const panelSplitRef  = useRef(0.45);
@@ -416,6 +525,13 @@ export default function App() {
     const font        = isWord ? "500 12px Inter,sans-serif" : "11px 'JetBrains Mono',monospace";
     const hoverEdge   = hoverEdgeRef.current;
 
+    // Red(0)→Yellow(0.5)→Green(1) gradient for confidence scores
+    const scoreColor = (score, alpha) => {
+      const r = score < 0.5 ? 255 : Math.round(255 * (1 - (score - 0.5) * 2));
+      const g = score > 0.5 ? 200 : Math.round(200 * score * 2);
+      return `rgba(${r},${g},50,${alpha})`;
+    };
+
     for (const item of items) {
       if (item.t1 < t0 || item.t0 > t1) continue;
       const x0 = Math.max(0, tX(item.t0, w));
@@ -425,9 +541,13 @@ export default function App() {
       const row = item.row ?? 0;
       const ry = row * rowH;
 
-      ctx.fillStyle = inEdit ? editFill : fillColor;
+      const hasScore = isWord && item.score != null;
+      const fill   = hasScore ? scoreColor(item.score, inEdit ? 0.40 : 0.28) : (inEdit ? editFill : fillColor);
+      const stroke = hasScore ? scoreColor(item.score, 0.75)                  : strokeColor;
+
+      ctx.fillStyle = fill;
       ctx.fillRect(x0, ry + 2, bw, rowH - 4);
-      ctx.strokeStyle = strokeColor; ctx.lineWidth = inEdit ? 1.5 : 1;
+      ctx.strokeStyle = stroke; ctx.lineWidth = inEdit ? 1.5 : 1;
       ctx.strokeRect(x0 + 0.5, ry + 2.5, bw - 1, rowH - 5);
 
       // Highlight hovered edge handles in edit mode
@@ -459,8 +579,15 @@ export default function App() {
     const DUR = durationRef.current;
     const { t0, t1 } = viewRef.current;
     ctx.fillStyle = '#0c0c0f'; ctx.fillRect(0, 0, w, h);
-    ctx.fillStyle = 'rgba(58,123,213,0.3)';
     for (const wd of wordsRef.current) {
+      if (wd.score != null) {
+        const s = wd.score;
+        const r = s < 0.5 ? 255 : Math.round(255 * (1 - (s - 0.5) * 2));
+        const g = s > 0.5 ? 200 : Math.round(200 * s * 2);
+        ctx.fillStyle = `rgba(${r},${g},50,0.55)`;
+      } else {
+        ctx.fillStyle = 'rgba(58,123,213,0.3)';
+      }
       ctx.fillRect((wd.t0 / DUR) * w, 3, Math.max(1, ((wd.t1 - wd.t0) / DUR) * w), h - 6);
     }
     const vx0 = (t0 / DUR) * w, vx1 = (t1 / DUR) * w;
@@ -662,7 +789,7 @@ export default function App() {
   const tick = useCallback(() => {
     if (!playingRef.current) return;
     const DUR = durationRef.current;
-    const t = playStartAtRef.current + (getAudioCtx().currentTime - playStartCtxRef.current);
+    const t = playStartAtRef.current + (getAudioCtx().currentTime - playStartCtxRef.current) * playbackRateRef.current;
     playheadRef.current = Math.min(playEndAtRef.current, t);
     updateTimeDisplay();
     const { t0, t1 } = viewRef.current;
@@ -684,9 +811,10 @@ export default function App() {
     const src = ctx.createBufferSource();
     src.buffer = audioBufferRef.current;
     src.connect(ctx.destination);
+    src.playbackRate.value = playbackRateRef.current;
     const sel = selectionRef.current;
     const to = sel ? sel.t1 : durationRef.current;
-    src.start(0, from, to - from);
+    src.start(0, from, (to - from) / playbackRateRef.current);
     src.onended = () => {
       if (loopModeRef.current && sel && playingRef.current) { startPlay(sel.t0); return; }
       stopAudio();
@@ -737,8 +865,9 @@ export default function App() {
 
   const loadTextGrid = useCallback((text) => {
     const { duration: dur, tiers } = parseTextGrid(text);
-    const w = assignRows(withIds(tiers['words'] || []));
-    const p = assignRows(withIds(tiers['phones'] || tiers['phonemes'] || tiers['phone'] || []));
+    const tierLower = Object.fromEntries(Object.entries(tiers).map(([k, v]) => [k.toLowerCase(), v]));
+    const w = assignRows(withIds(tierLower['words'] || []));
+    const p = assignRows(withIds(tierLower['phones'] || tierLower['phonemes'] || tierLower['phone'] || []));
     durationRef.current = dur; setDuration(dur);
     wordsRef.current = w;      setWords(w);
     phonesRef.current = p;     setPhones(p);
@@ -799,8 +928,7 @@ export default function App() {
           stopPlay();
         } else if (audioBufferRef.current) {
           const sel = selectionRef.current;
-          const ph = playheadRef.current;
-          startPlay((sel && (ph < sel.t0 || ph > sel.t1)) ? sel.t0 : ph);
+          startPlay(sel ? sel.t0 : playheadRef.current);
         }
       }
       if (e.code === 'KeyL') { const n = !loopModeRef.current; loopModeRef.current = n; setLoopMode(n); }
@@ -1042,11 +1170,6 @@ export default function App() {
       }
     };
 
-    const onMouseLeave = () => {
-      canvas.style.cursor = '';
-      if (hoverEdgeRef.current) { hoverEdgeRef.current = null; drawTier(canvas, items, isWord); }
-    };
-    // Need items reference inside closure; use itemsRef
     const onMouseLeaveFixed = () => {
       canvas.style.cursor = '';
       if (hoverEdgeRef.current) { hoverEdgeRef.current = null; drawTier(canvas, itemsRef.current, isWord); }
@@ -1406,8 +1529,8 @@ export default function App() {
               if (playing) {
                 stopPlay();
               } else if (audioBufferRef.current) {
-                const sel = selectionRef.current, ph = playheadRef.current;
-                startPlay((sel && (ph < sel.t0 || ph > sel.t1)) ? sel.t0 : ph);
+                const sel = selectionRef.current;
+                startPlay(sel ? sel.t0 : playheadRef.current);
               } else {
                 alert('Drop an audio file onto the page, or click Load audio.');
               }
@@ -1417,6 +1540,25 @@ export default function App() {
           <div className="time-display" ref={timeDisplayRef}>
             {fmtTime(playheadRef.current)} / {fmtTime(duration)}
           </div>
+          <select
+            className="colormap-select"
+            value={playbackRate}
+            onChange={e => {
+              const r = parseFloat(e.target.value);
+              playbackRateRef.current = r;
+              setPlaybackRate(r);
+              if (playingRef.current) {
+                const ph = playheadRef.current;
+                stopPlay();
+                startPlay(ph);
+              }
+            }}
+            title="Playback speed"
+          >
+            {[0.25, 0.5, 0.75, 1, 1.25, 1.5, 2].map(r => (
+              <option key={r} value={r}>Playback speed: {r}×</option>
+            ))}
+          </select>
         </div>
         <div className="zoom-row">
           <span className="zoom-label">ZOOM</span>
@@ -1459,6 +1601,13 @@ export default function App() {
             {editShortcut}
           </button>
         )}
+        <button
+          className={`btn${showDashboard ? ' active' : ''}`}
+          onClick={() => setShowDashboard(v => !v)}
+          title="Toggle confidence score distribution panel"
+        >
+          ◎ Scores
+        </button>
         <button className="btn" onClick={exportTextGrid} title="Export TextGrid">
           ↓ Export
         </button>
@@ -1478,7 +1627,8 @@ export default function App() {
         </select>
       </div>
 
-      <div className="timeline" ref={timelineRef}>
+      <div style={{ flex: 1, minHeight: 0, display: 'flex', overflow: 'hidden' }}>
+      <div className="timeline" ref={timelineRef} style={{ flex: 1, minWidth: 0 }}>
         <canvas className="playhead-overlay" ref={overlayCanvasRef} />
 
         <div className="timeline-body">
@@ -1583,6 +1733,11 @@ export default function App() {
           <canvas ref={minimapCanvasRef} />
         </div>
       </div>
+
+      {/* Confidence dashboard side panel */}
+      {showDashboard && <ConfidenceDashboard words={words} />}
+
+      </div>{/* flex wrapper */}
 
       <div className={`token-popup${popup ? ' show' : ''}`} style={popup ? { left: popup.left, top: popup.top } : {}}>
         {popup && (

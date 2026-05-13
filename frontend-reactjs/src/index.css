@@ -44,6 +44,7 @@ html, body {
 .load-btn:hover { background: #2e2e36; color: #c8c6c1; }
 .load-btn input { display: none; }
 
+
 /* ── Timeline ── */
 .timeline {
   flex: 1; min-height: 0;
