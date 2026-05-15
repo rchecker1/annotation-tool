@@ -6,8 +6,6 @@ import {
   buildMelSpectrogram, buildRmsEnvelope, buildFormantTrack,
 } from './dsp.js';
 
-const BUNDLED_WAV = 'Bluey_blueyp1aud_region280-350s.wav';
-const BUNDLED_TG  = 'Bluey_blueyp1aud_region280%E2%80%93350s_original.TextGrid';
 
 let _nextId = 1;
 const nextId = () => _nextId++;
@@ -206,6 +204,7 @@ export default function App() {
   const [mfaRunning, setMfaRunning]       = useState(false);
   const [mfaError, setMfaError]           = useState(null);   // string | null
   const [mfaWordPicker, setMfaWordPicker] = useState(null);   // { words: WordItem[], sel } | null
+  const [setupError, setSetupError]       = useState(null);   // string | null — shown before audio loads
   const MFA_SERVER = 'http://localhost:5050';
   const playbackRateRef = useRef(1);
   const editShortcutRef = useRef('F1');
@@ -741,7 +740,7 @@ export default function App() {
 
   // ── Audio context ─────────────────────────────────────────────────────
   const getAudioCtx = () => {
-    if (!audioCtxRef.current)
+    if (!audioCtxRef.current || audioCtxRef.current.state === 'closed')
       audioCtxRef.current = new (window.AudioContext || window.webkitAudioContext)();
     return audioCtxRef.current;
   };
@@ -815,7 +814,7 @@ export default function App() {
       rafIdRef.current = requestAnimationFrame(tick);
     };
     if (ctx.state === 'suspended') {
-      ctx.resume().then(doStart);
+      ctx.resume().then(doStart).catch(err => console.error('AudioContext resume failed:', err));
     } else {
       doStart();
     }
@@ -879,14 +878,53 @@ export default function App() {
 
   useEffect(() => {
     (async () => {
+      let manifest;
       try {
-        const res = await fetch(BUNDLED_TG);
-        if (res.ok) loadTextGrid(await res.text());
-      } catch(e) { console.warn('TextGrid load failed:', e); }
+        const res = await fetch('/api/public-files');
+        manifest = res.ok ? await res.json() : null;
+      } catch(_) { manifest = null; }
+
+      if (!manifest) {
+        // Running as a built/static app — skip auto-load silently
+        return;
+      }
+
+      const { wavs, tgs } = manifest;
+
+      if (wavs.length === 0) {
+        setSetupError(
+          'No WAV file found in public/.\n' +
+          'Add exactly one .wav and one .TextGrid file to the public/ folder, then reload.'
+        );
+        return;
+      }
+      if (wavs.length > 1) {
+        setSetupError(
+          `Found ${wavs.length} WAV files in public/: ${wavs.join(', ')}\n` +
+          'Keep exactly one .wav file in public/, then reload.'
+        );
+        return;
+      }
+      if (tgs.length > 1) {
+        setSetupError(
+          `Found ${tgs.length} TextGrid files in public/: ${tgs.join(', ')}\n` +
+          'Keep exactly one .TextGrid file in public/, then reload.'
+        );
+        return;
+      }
+
+      // Exactly one WAV (and zero or one TextGrid) — auto-load
+      if (tgs.length === 1) {
+        try {
+          const res = await fetch(`/${encodeURIComponent(tgs[0])}`);
+          if (res.ok) loadTextGrid(await res.text());
+        } catch(e) { console.warn('TextGrid load failed:', e); }
+      }
       try {
-        const res = await fetch(BUNDLED_WAV);
+        const res = await fetch(`/${encodeURIComponent(wavs[0])}`);
         if (!res.ok) throw new Error(res.statusText);
-        await loadAudio(new File([await res.blob()], BUNDLED_WAV, { type: 'audio/wav' }));
+        await loadAudio(new File([await res.blob()], wavs[0], { type: 'audio/wav' }));
+        setSetupError(null);
       } catch(e) { console.warn('Audio auto-load failed:', e); }
     })();
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1658,6 +1696,27 @@ export default function App() {
         <div style={{ fontSize: 32 }}>🎵</div>
         <div>Drop audio or TextGrid file to load</div>
       </div>
+
+      {setupError && (
+        <div style={{
+          position: 'fixed', inset: 0, zIndex: 9999,
+          background: '#0f0f11', display: 'flex', flexDirection: 'column',
+          alignItems: 'center', justifyContent: 'center', gap: 16,
+        }}>
+          <div style={{ fontSize: 36 }}>📂</div>
+          <div style={{ fontSize: 15, fontWeight: 600, color: '#e8e6e1' }}>Setup required</div>
+          {setupError.split('\n').map((line, i) => (
+            <div key={i} style={{ fontSize: 13, color: '#9a9890', maxWidth: 480, textAlign: 'center' }}>{line}</div>
+          ))}
+          <div style={{
+            marginTop: 8, padding: '10px 18px', borderRadius: 8,
+            background: '#18181c', border: '1px solid #2a2a30',
+            fontFamily: "'JetBrains Mono', monospace", fontSize: 12, color: '#7aacf0',
+          }}>
+            annotation_tool/code/frontend-reactjs/public/
+          </div>
+        </div>
+      )}
 
       {/* Floating label editor input */}
       {labelEditor && (
