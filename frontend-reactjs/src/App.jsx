@@ -201,11 +201,14 @@ export default function App() {
   const [editingShortcut, setEditingShortcut] = useState(false);
   const [showDashboard, setShowDashboard] = useState(false);
   const [playbackRate, setPlaybackRate]   = useState(1);
-  const [mfaRunning, setMfaRunning]       = useState(false);
+  const [mfaQueue, setMfaQueue]           = useState([]);      // {id,label,t0,t1,status,error}
   const [mfaError, setMfaError]           = useState(null);   // string | null
   const [mfaWordPicker, setMfaWordPicker] = useState(null);   // { words: WordItem[], sel } | null
+  const [mfaQueueOpen, setMfaQueueOpen]   = useState(false);  // dropdown visible
   const [setupError, setSetupError]       = useState(null);   // string | null — shown before audio loads
   const MFA_SERVER = 'http://localhost:5050';
+  const mfaQueueRef = useRef([]);
+  const mfaProcessingRef = useRef(false);
   const playbackRateRef = useRef(1);
   const editShortcutRef = useRef('F1');
 
@@ -1568,79 +1571,101 @@ export default function App() {
    * The selected segment is used as the audio region AND as the time bounds passed
    * to the server.  The word labels inside that segment become the transcript.
    */
-  const runMfaForWords = useCallback(async (targetWords) => {
-    const sel = selectionRef.current;
-    if (!sel) { setMfaError('Make a selection first'); return; }
-    if (!audioBufferRef.current) { setMfaError('No audio loaded'); return; }
-    if (!targetWords || targetWords.length === 0) { setMfaError('No words in selection'); return; }
+  const updateQueue = useCallback((updater) => {
+    mfaQueueRef.current = updater(mfaQueueRef.current);
+    setMfaQueue([...mfaQueueRef.current]);
+  }, []);
 
-    setMfaRunning(true);
-    setMfaError(null);
+  const processNextMfaJob = useCallback(async () => {
+    if (mfaProcessingRef.current) return;
+    const next = mfaQueueRef.current.find(j => j.status === 'pending');
+    if (!next) return;
+    mfaProcessingRef.current = true;
+
+    updateQueue(q => q.map(j => j.id === next.id ? { ...j, status: 'running' } : j));
 
     try {
-      const buf  = audioBufferRef.current;
-      const sr   = buf.sampleRate;
-      const segT0 = sel.t0;
-      const segT1 = sel.t1;
+      const buf = audioBufferRef.current;
+      if (!buf) throw new Error('No audio loaded');
+      const sr = buf.sampleRate;
+      const { segT0, segT1, targetWords } = next;
 
-      if (segT1 - segT0 < 0.05)
-        throw new Error('Selection is too short (< 50 ms) to align');
+      if (segT1 - segT0 < 0.05) throw new Error('Selection too short (< 50 ms)');
 
-      // Slice the channel data for this segment
       const startSample = Math.max(0, Math.floor(segT0 * sr));
       const endSample   = Math.min(buf.length, Math.ceil(segT1 * sr));
       const ch = buf.getChannelData(0).slice(startSample, endSample);
+      if (ch.length === 0) throw new Error('No audio samples in region');
 
-      if (ch.length === 0)
-        throw new Error('No audio samples in the selected region');
-
-      // Build transcript string from the target words (preserving order)
       const sorted = [...targetWords].sort((a, b) => a.t0 - b.t0);
       const transcript = sorted.map(w => w.text.trim()).filter(Boolean).join(' ');
+      if (!transcript) throw new Error('Words have no text');
 
-      if (!transcript)
-        throw new Error('Selected words have no text — cannot align empty transcript');
-
-      // Health-check the server first so the error is clear
       let serverOk = false;
       try {
         const hResp = await fetch(`${MFA_SERVER}/health`, { signal: AbortSignal.timeout(3000) });
         serverOk = hResp.ok;
-      } catch(_) { /* fall through */ }
+      } catch(_) {}
+      if (!serverOk) throw new Error(`MFA server not reachable at ${MFA_SERVER}\nRun: cd code && python mfa_server.py`);
 
-      if (!serverOk)
-        throw new Error(
-          `Cannot reach MFA server at ${MFA_SERVER}.\n` +
-          `Start it with:\n  cd code && python mfa_server.py`
-        );
-
-      // Spin up the worker
       const result = await new Promise((resolve, reject) => {
         const worker = new Worker(new URL('./mfaWorker.js', import.meta.url), { type: 'module' });
         worker.onmessage = ({ data: res }) => { worker.terminate(); resolve(res); };
         worker.onerror   = (err) => { worker.terminate(); reject(new Error(err.message)); };
-        worker.postMessage(
-          { ch, sr, t0: segT0, t1: segT1, words: transcript, serverUrl: MFA_SERVER },
-          [ch.buffer]
-        );
+        worker.postMessage({ ch, sr, t0: segT0, t1: segT1, words: transcript, serverUrl: MFA_SERVER }, [ch.buffer]);
       });
 
-      if (!result.ok)
-        throw new Error(result.error);
+      if (!result.ok) throw new Error(result.error);
 
-      // Apply — this also validates
       pushUndo();
       const merged = applyMfaResult(result.phones, segT0, segT1);
       phonesRef.current = merged;
       setPhones([...merged]);
       redraw();
 
+      updateQueue(q => q.filter(j => j.id !== next.id));
     } catch (err) {
-      setMfaError(err.message || String(err));
+      const msg = err.message || String(err);
+      updateQueue(q => q.map(j => j.id === next.id ? { ...j, status: 'error', error: msg } : j));
+      setMfaError(msg);
     } finally {
-      setMfaRunning(false);
+      mfaProcessingRef.current = false;
+      // process next pending job if any
+      const remaining = mfaQueueRef.current.find(j => j.status === 'pending');
+      if (remaining) processNextMfaJob();
     }
-  }, [applyMfaResult, pushUndo, redraw]);
+  }, [applyMfaResult, pushUndo, redraw, updateQueue]);
+
+  const enqueueRunMfa = useCallback((targetWords, sel) => {
+    const sorted = [...targetWords].sort((a, b) => a.t0 - b.t0);
+    const label = sorted.map(w => w.text.trim()).filter(Boolean).join(' ');
+    const pending = mfaQueueRef.current.filter(j => j.status === 'pending' || j.status === 'running');
+    if (pending.length >= 4) {
+      setMfaError('Queue full (max 4 jobs). Wait for one to finish.');
+      return;
+    }
+    const job = {
+      id: nextId(),
+      label,
+      segT0: sel.t0,
+      segT1: sel.t1,
+      targetWords,
+      status: 'pending',
+      error: null,
+    };
+    updateQueue(q => [...q, job]);
+    setMfaQueueOpen(true);
+    // kick off processing if nothing is running
+    setTimeout(() => processNextMfaJob(), 0);
+  }, [updateQueue, processNextMfaJob]);
+
+  const runMfaForWords = useCallback((targetWords) => {
+    const sel = selectionRef.current;
+    if (!sel) { setMfaError('Make a selection first'); return; }
+    if (!audioBufferRef.current) { setMfaError('No audio loaded'); return; }
+    if (!targetWords || targetWords.length === 0) { setMfaError('No words in selection'); return; }
+    enqueueRunMfa(targetWords, sel);
+  }, [enqueueRunMfa]);
 
   /**
    * Entry point called by the "Run MFA" button.
@@ -1837,14 +1862,77 @@ export default function App() {
         >
           ◎ Scores
         </button>
-        <button
-          className={`btn btn-mfa${mfaRunning ? ' computing' : ''}`}
-          onClick={handleRunMfa}
-          disabled={mfaRunning}
-          title="Run Montreal Forced Aligner on the current selection"
-        >
-          {mfaRunning ? '⟳ MFA…' : '⚙ Run MFA'}
-        </button>
+        {/* ── MFA button + queue dropdown ───────────────────────────── */}
+        {(() => {
+          const running = mfaQueue.find(j => j.status === 'running');
+          const pending = mfaQueue.filter(j => j.status === 'pending');
+          const errors  = mfaQueue.filter(j => j.status === 'error');
+          const busy    = !!running;
+          const queueCount = pending.length + (running ? 1 : 0);
+          const label = running
+            ? `⟳ ${running.label} ${running.segT0.toFixed(1)}–${running.segT1.toFixed(1)}s`
+            : '⚙ Run MFA';
+          return (
+            <div style={{ position: 'relative' }}>
+              <div style={{ display: 'flex' }}>
+                <button
+                  className={`btn btn-mfa${busy ? ' computing' : ''}`}
+                  onClick={handleRunMfa}
+                  title="Run MFA on current selection"
+                  style={{ borderRadius: queueCount > 0 ? '6px 0 0 6px' : 6, borderRight: queueCount > 0 ? 'none' : undefined, maxWidth: 180, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                >
+                  {label}
+                </button>
+                {queueCount > 0 && (
+                  <button
+                    className={`btn btn-mfa${busy ? ' computing' : ''}`}
+                    onClick={() => setMfaQueueOpen(v => !v)}
+                    title="Show MFA queue"
+                    style={{ borderRadius: '0 6px 6px 0', padding: '5px 8px', borderLeft: '1px solid rgba(80,180,80,0.2)' }}
+                  >
+                    {queueCount}▾
+                  </button>
+                )}
+              </div>
+              {mfaQueueOpen && mfaQueue.length > 0 && (
+                <div
+                  style={{
+                    position: 'absolute', top: '100%', right: 0, marginTop: 4,
+                    background: '#18181c', border: '1px solid #2a2a30', borderRadius: 8,
+                    minWidth: 260, zIndex: 8000, boxShadow: '0 4px 16px rgba(0,0,0,0.6)',
+                    padding: '6px 0',
+                  }}
+                  onMouseLeave={() => setMfaQueueOpen(false)}
+                >
+                  {mfaQueue.map((job, i) => (
+                    <div key={job.id} style={{
+                      display: 'flex', alignItems: 'center', gap: 8,
+                      padding: '5px 12px',
+                      borderBottom: i < mfaQueue.length - 1 ? '1px solid #1e1e24' : 'none',
+                    }}>
+                      <span style={{ fontSize: 11, color: job.status === 'running' ? '#f0c070' : job.status === 'error' ? '#f08080' : '#6b6a65', flexShrink: 0 }}>
+                        {job.status === 'running' ? '⟳' : job.status === 'error' ? '✕' : '○'}
+                      </span>
+                      <span style={{ flex: 1, fontSize: 11, color: '#c8c6c1', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {job.label}
+                      </span>
+                      <span style={{ fontSize: 10, fontFamily: "'JetBrains Mono',monospace", color: '#45454d', flexShrink: 0 }}>
+                        {job.segT0.toFixed(1)}–{job.segT1.toFixed(1)}s
+                      </span>
+                      {(job.status === 'pending' || job.status === 'error') && (
+                        <button
+                          onClick={() => updateQueue(q => q.filter(j => j.id !== job.id))}
+                          style={{ background: 'none', border: 'none', color: '#45454d', cursor: 'pointer', padding: 0, fontSize: 13, lineHeight: 1, flexShrink: 0 }}
+                          title="Remove"
+                        >×</button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        })()}
         <button className="btn" onClick={exportTextGrid} title="Export TextGrid">
           ↓ Export
         </button>
@@ -1987,28 +2075,23 @@ export default function App() {
         )}
       </div>
 
-      {/* ── MFA error banner ─────────────────────────────────────────────── */}
+      {/* ── MFA error toast ──────────────────────────────────────────────── */}
       {mfaError && (
-        <div
-          style={{
-            position: 'fixed', bottom: 28, left: '50%', transform: 'translateX(-50%)',
-            background: '#2a1010', border: '1px solid #a03030', borderRadius: 8,
-            padding: '10px 16px', zIndex: 8000, maxWidth: 560, minWidth: 280,
-            fontFamily: 'Inter,system-ui,sans-serif', fontSize: 12, color: '#f08080',
-            display: 'flex', alignItems: 'flex-start', gap: 10,
-            boxShadow: '0 4px 20px rgba(0,0,0,0.6)',
-          }}
-        >
-          <span style={{ flexShrink: 0, fontSize: 16 }}>⚠</span>
-          <pre style={{ margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word', flex: 1, fontSize: 11 }}>
+        <div style={{
+          position: 'fixed', bottom: 16, right: 16, zIndex: 8000,
+          background: '#2a1010', border: '1px solid #a03030', borderRadius: 7,
+          padding: '7px 10px 7px 12px', maxWidth: 380,
+          fontFamily: 'Inter,system-ui,sans-serif', fontSize: 11, color: '#f08080',
+          display: 'flex', alignItems: 'flex-start', gap: 8,
+          boxShadow: '0 4px 16px rgba(0,0,0,0.5)',
+        }}>
+          <span style={{ flexShrink: 0 }}>⚠</span>
+          <span style={{ flex: 1, whiteSpace: 'pre-wrap', wordBreak: 'break-word', lineHeight: 1.5 }}>
             {mfaError}
-          </pre>
+          </span>
           <button
             onClick={() => setMfaError(null)}
-            style={{
-              background: 'none', border: 'none', color: '#f08080', cursor: 'pointer',
-              fontSize: 16, padding: '0 0 0 8px', flexShrink: 0, lineHeight: 1,
-            }}
+            style={{ background: 'none', border: 'none', color: '#f08080', cursor: 'pointer', fontSize: 14, padding: '0 0 0 4px', flexShrink: 0, lineHeight: 1, alignSelf: 'flex-start' }}
             title="Dismiss"
           >×</button>
         </div>
