@@ -10,6 +10,72 @@ import {
 let _nextId = 1;
 const nextId = () => _nextId++;
 
+const getTierType = (tierId) =>
+  tierId === 'phones' ? 'phone' : tierId === 'words' ? 'word' : 'custom';
+
+// ── IPA virtual keyboard ──────────────────────────────────────────────────────
+
+// Loaded once from public/ipa_keys.json — edit that file to change the keys.
+let _ipaKeys = null;
+async function loadIpaKeys() {
+  if (_ipaKeys) return _ipaKeys;
+  try {
+    const res = await fetch('/ipa_keys.json');
+    _ipaKeys = res.ok ? await res.json() : [];
+  } catch (_) { _ipaKeys = []; }
+  return _ipaKeys;
+}
+
+function IpaKeyboard({ inputRef }) {
+  const [keys, setKeys] = useState(_ipaKeys || []);
+
+  useEffect(() => {
+    if (!_ipaKeys) loadIpaKeys().then(setKeys);
+  }, []);
+
+  const insert = (val) => {
+    const el = inputRef.current;
+    if (!el) return;
+    const start = el.selectionStart ?? el.value.length;
+    const end   = el.selectionEnd   ?? el.value.length;
+    const next  = el.value.slice(0, start) + val + el.value.slice(end);
+    const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+    nativeSetter.call(el, next);
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.focus();
+    const pos = start + val.length;
+    el.setSelectionRange(pos, pos);
+  };
+
+  if (!keys.length) return null;
+
+  return (
+    <div
+      onMouseDown={e => e.preventDefault()}
+      style={{
+        marginTop: 4, padding: '5px 6px',
+        background: '#13131a', border: '1px solid #2a2a30', borderRadius: 6,
+        display: 'flex', flexWrap: 'wrap', gap: 3, maxWidth: 320,
+      }}
+    >
+      {keys.map(k => (
+        <button
+          key={k}
+          onMouseDown={e => e.preventDefault()}
+          onClick={() => insert(k)}
+          style={{
+            padding: '2px 6px', borderRadius: 4, border: '1px solid #2e2e3a',
+            background: '#1e1e26', color: '#c8c6c1', fontSize: 12,
+            fontFamily: "'JetBrains Mono',monospace", cursor: 'pointer', lineHeight: 1.4,
+          }}
+        >
+          {k}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 function scoreColor(score, alpha = 1) {
   const r = score < 0.5 ? 255 : Math.round(255 * (1 - (score - 0.5) * 2));
   const g = score > 0.5 ? 200 : Math.round(200 * score * 2);
@@ -39,10 +105,11 @@ function withIds(items) {
   return items.map(it => ({ ...it, id: it.id ?? nextId(), row: 0 }));
 }
 
-function serializeTextGrid(duration, wordItems, phoneItems) {
+function serializeTextGrid(duration, wordItems, phoneItems, customTiers = []) {
   const tierData = [
     { name: 'words', items: wordItems },
     { name: 'phones', items: phoneItems },
+    ...customTiers.map(t => ({ name: t.name, items: t.items })),
   ];
 
   const lines = [
@@ -82,6 +149,42 @@ function serializeTextGrid(duration, wordItems, phoneItems) {
   });
 
   return lines.join('\n');
+}
+
+
+function TierNamePopover({ onAdd, onClose }) {
+  const [name, setName] = useState('');
+  const doAdd = () => {
+    const n = name.trim();
+    if (!n) return;
+    onAdd(n);
+  };
+  return (
+    <div style={{
+      position: 'absolute', top: '100%', right: 0, marginTop: 4,
+      background: '#1e1e26', border: '1px solid #2e2e3a', borderRadius: 8,
+      padding: '10px 12px', zIndex: 8000, boxShadow: '0 4px 16px rgba(0,0,0,0.6)',
+      display: 'flex', gap: 6, alignItems: 'center', minWidth: 200,
+    }}>
+      <input
+        autoFocus
+        value={name}
+        onChange={e => setName(e.target.value)}
+        onKeyDown={e => { if (e.key === 'Enter') doAdd(); if (e.key === 'Escape') onClose(); }}
+        placeholder="Tier name…"
+        style={{
+          flex: 1, background: '#13131a', color: '#e8e6e1',
+          border: '1px solid #2e2e3a', borderRadius: 4,
+          padding: '4px 8px', fontSize: 12, fontFamily: 'Inter,sans-serif', outline: 'none',
+        }}
+      />
+      <button
+        className="btn"
+        onClick={doAdd}
+        style={{ padding: '4px 10px', fontSize: 12 }}
+      >Add</button>
+    </div>
+  );
 }
 
 function ConfidenceDashboard({ words }) {
@@ -196,7 +299,7 @@ export default function App() {
   const [specComputing, setSpecComputing] = useState(false);
   const [formantComputing, setFormantComputing] = useState(false);
   const [editMode, setEditMode]         = useState(false);
-  const [labelEditor, setLabelEditor]   = useState(null); // { id, isWord, text, x, y, w }
+  const [labelEditor, setLabelEditor]   = useState(null); // { id, tierId, tierType, text, x, y, boxW }
   const [editShortcut, setEditShortcut] = useState('F1');
   const [editingShortcut, setEditingShortcut] = useState(false);
   const [showDashboard, setShowDashboard] = useState(false);
@@ -206,6 +309,10 @@ export default function App() {
   const [mfaWordPicker, setMfaWordPicker] = useState(null);   // { words: WordItem[], sel } | null
   const [mfaQueueOpen, setMfaQueueOpen]   = useState(false);  // dropdown visible
   const [setupError, setSetupError]       = useState(null);   // string | null — shown before audio loads
+  const [customTiers, setCustomTiers]     = useState([]);     // { id, name, visible, items }
+  const [wordsVisible, setWordsVisible]   = useState(true);
+  const [phonesVisible, setPhonesVisible] = useState(true);
+  const [showTierManager, setShowTierManager] = useState(false);
   const MFA_SERVER = 'http://localhost:5050';
   const mfaQueueRef = useRef([]);
   const mfaProcessingRef = useRef(false);
@@ -245,14 +352,17 @@ export default function App() {
   const formantViewRef   = useRef(null);
   const wordsRef         = useRef([]);
   const phonesRef        = useRef([]);
+  const customTiersRef   = useRef([]);
+  const customCanvasRefs = useRef({}); // keyed by tier id
+  const customTierDivRefs = useRef({}); // keyed by tier id — the .tier div element
   const durationRef      = useRef(70);
   const colormapNameRef  = useRef('jet');
   const showFormantsRef  = useRef(false);
   const rmsEnvRef        = useRef(null);
   const formantTrackRef  = useRef(null);
   const editModeRef      = useRef(false);
-  const undoStackRef     = useRef([]); // snapshots: { words, phones }
-  const hoverEdgeRef     = useRef(null); // { id, isWord, side: 'left'|'right' } for cursor feedback
+  const undoStackRef     = useRef([]); // snapshots: { words, phones, customTiers }
+  const hoverEdgeRef     = useRef(null); // { id, tierId, side: 'left'|'right' } for cursor feedback
 
   // ── Canvas element refs ───────────────────────────────────────────────
   const waveCanvasRef    = useRef(null);
@@ -276,11 +386,24 @@ export default function App() {
     return t0 + (x / w) * (t1 - t0);
   }, []);
 
+  // ── Tier item commit (shared across edit interaction and commitLabel) ──
+  const commitTierItems = useCallback((tierId, updated) => {
+    if (tierId === 'words') {
+      wordsRef.current = updated; setWords([...updated]);
+    } else if (tierId === 'phones') {
+      phonesRef.current = updated; setPhones([...updated]);
+    } else {
+      const ct = customTiersRef.current.map(t => t.id === tierId ? { ...t, items: updated } : t);
+      customTiersRef.current = ct; setCustomTiers([...ct]);
+    }
+  }, []);
+
   // ── Undo ──────────────────────────────────────────────────────────────
   const pushUndo = useCallback(() => {
     undoStackRef.current.push({
       words:  wordsRef.current.map(it => ({ ...it })),
       phones: phonesRef.current.map(it => ({ ...it })),
+      customTiers: customTiersRef.current.map(t => ({ ...t, items: t.items.map(i => ({ ...i })) })),
     });
     if (undoStackRef.current.length > 100) undoStackRef.current.shift();
   }, []);
@@ -290,8 +413,10 @@ export default function App() {
     if (!snap) return;
     wordsRef.current  = snap.words;
     phonesRef.current = snap.phones;
+    customTiersRef.current = snap.customTiers || [];
     setWords([...snap.words]);
     setPhones([...snap.phones]);
+    setCustomTiers([...(snap.customTiers || [])]);
   }, []);
 
   // ── Draw helpers ──────────────────────────────────────────────────────
@@ -622,6 +747,10 @@ export default function App() {
     drawWave(); drawSpec(); drawRuler();
     drawTier(wordsCanvasRef.current, wordsRef.current, true);
     drawTier(phonesCanvasRef.current, phonesRef.current, false);
+    for (const tier of customTiersRef.current) {
+      const cv = customCanvasRefs.current[tier.id];
+      if (cv) drawTier(cv, tier.items, false);
+    }
     drawMinimap();
   }, [drawWave, drawSpec, drawRuler, drawTier, drawMinimap]);
 
@@ -789,16 +918,20 @@ export default function App() {
   }, [drawOverlay, redraw, updateTimeDisplay]);
 
   const startPlay = useCallback((from) => {
+    console.log('[startPlay] audioBuffer:', !!audioBufferRef.current, 'from:', from);
     if (!audioBufferRef.current) return;
     stopAudio();
     const ctx = getAudioCtx();
+    console.log('[startPlay] ctx state:', ctx.state);
     const doStart = () => {
+      console.log('[startPlay] doStart, ctx.state:', ctx.state);
       const src = ctx.createBufferSource();
       src.buffer = audioBufferRef.current;
       src.connect(ctx.destination);
       src.playbackRate.value = playbackRateRef.current;
       const sel = selectionRef.current;
       const to = sel ? sel.t1 : durationRef.current;
+      console.log('[startPlay] src.start(0,', from, ',', to - from, ')');
       src.start(0, from, to - from);
       src.onended = () => {
         if (loopModeRef.current && sel && playingRef.current) { startPlay(sel.t0); return; }
@@ -817,6 +950,7 @@ export default function App() {
       rafIdRef.current = requestAnimationFrame(tick);
     };
     if (ctx.state === 'suspended') {
+      console.log('[startPlay] resuming suspended context...');
       ctx.resume().then(doStart).catch(err => console.error('AudioContext resume failed:', err));
     } else {
       doStart();
@@ -826,9 +960,29 @@ export default function App() {
   // ── Data loading ──────────────────────────────────────────────────────
 
   const loadAudio = useCallback(async (file) => {
-    const ctx = getAudioCtx();
-    const buffer = await ctx.decodeAudioData((await file.arrayBuffer()).slice(0));
+    // Decode using a temporary AudioContext so we never create the real one
+    // before a user gesture (which would leave it permanently suspended).
+    const tmpCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const buffer = await tmpCtx.decodeAudioData((await file.arrayBuffer()).slice(0));
+    tmpCtx.close();
+
+    // If replacing an existing file, stop playback and clear tiers/undo
+    if (audioBufferRef.current) {
+      stopAudio();
+      wordsRef.current  = []; setWords([]);
+      phonesRef.current = []; setPhones([]);
+      undoStackRef.current = [];
+      spectroRef.current = null;
+      spectroCacheRef.current = { canvas: null };
+      baseSpecCacheRef.current = { canvas: null };
+      formantTrackRef.current = null;
+    }
+
     audioBufferRef.current = buffer;
+    durationRef.current = buffer.duration;
+    setDuration(buffer.duration);
+    viewRef.current = { t0: 0, t1: Math.min(buffer.duration, 20) };
+    playheadRef.current = 0;
 
     const ch = buffer.getChannelData(0);
     const N = 4000, step = Math.floor(ch.length / N);
@@ -852,7 +1006,7 @@ export default function App() {
       formantTrackRef.current = buildFormantTrack(buffer);
       redraw();
     }, 50);
-  }, [redraw]);
+  }, [redraw, stopAudio]);
 
   const loadTextGrid = useCallback((text) => {
     const { duration: dur, tiers } = parseTextGrid(text);
@@ -862,13 +1016,27 @@ export default function App() {
     durationRef.current = dur; setDuration(dur);
     wordsRef.current = w;      setWords(w);
     phonesRef.current = p;     setPhones(p);
+
+    // Load any extra tiers as custom tiers
+    const builtinKeys = new Set(['words', 'phones', 'phonemes', 'phone']);
+    const extraTiers = Object.entries(tiers)
+      .filter(([k]) => !builtinKeys.has(k.toLowerCase()))
+      .map(([name, items]) => ({
+        id: nextId(),
+        name,
+        visible: true,
+        items: assignRows(withIds(items || [])),
+      }));
+    customTiersRef.current = extraTiers;
+    setCustomTiers([...extraTiers]);
+
     viewRef.current = { t0: 0, t1: Math.min(dur, 20) };
     redraw();
   }, [redraw]);
 
   // ── Export TextGrid ───────────────────────────────────────────────────
   const exportTextGrid = useCallback(() => {
-    const text = serializeTextGrid(durationRef.current, wordsRef.current, phonesRef.current);
+    const text = serializeTextGrid(durationRef.current, wordsRef.current, phonesRef.current, customTiersRef.current);
     const blob = new Blob([text], { type: 'text/plain' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -1122,13 +1290,13 @@ export default function App() {
   }, [redraw]);
 
   // Token hover popup (only in select mode)
-  const addHover = useCallback((canvas, isWord) => {
+  const addHover = useCallback((canvas, getItems) => {
     if (!canvas) return () => {};
     const onMove = (e) => {
       if (editModeRef.current) { setPopup(null); return; }
       const rect = canvas.getBoundingClientRect();
       const t = xT(e.clientX - rect.left, rect.width);
-      const items = isWord ? wordsRef.current : phonesRef.current;
+      const items = typeof getItems === 'function' ? getItems() : (getItems ? wordsRef.current : phonesRef.current);
       const item = items.find(it => t >= it.t0 && t <= it.t1);
       if (!item) { setPopup(null); return; }
       let left = e.clientX - 80, top = rect.top - 62;
@@ -1146,8 +1314,8 @@ export default function App() {
   }, [xT]);
 
   useEffect(() => {
-    const c1 = addHover(wordsCanvasRef.current, true);
-    const c2 = addHover(phonesCanvasRef.current, false);
+    const c1 = addHover(wordsCanvasRef.current, () => wordsRef.current);
+    const c2 = addHover(phonesCanvasRef.current, () => phonesRef.current);
     return () => { c1(); c2(); };
   }, [addHover]);
 
@@ -1178,13 +1346,12 @@ export default function App() {
     return null;
   }, [xT]);
 
-  const addTierEditInteraction = useCallback((canvas, itemsRef, isWord) => {
+  const addTierEditInteraction = useCallback((canvas, itemsRef, isWord, tierId) => {
     if (!canvas) return () => {};
 
     const commitItems = (updated) => {
       itemsRef.current = updated;
-      if (isWord) { wordsRef.current = updated; setWords([...updated]); }
-      else        { phonesRef.current = updated; setPhones([...updated]); }
+      commitTierItems(tierId, updated);
     };
 
     const onMouseMove = (e) => {
@@ -1195,7 +1362,7 @@ export default function App() {
       if (hit && (hit.side === 'left' || hit.side === 'right')) {
         canvas.style.cursor = 'ew-resize';
         if (!prev || prev.id !== hit.item.id || prev.side !== hit.side) {
-          hoverEdgeRef.current = { id: hit.item.id, isWord, side: hit.side };
+          hoverEdgeRef.current = { id: hit.item.id, tierId, side: hit.side };
           drawTier(canvas, items, isWord);
         }
       } else if (hit && hit.side === 'body') {
@@ -1260,7 +1427,8 @@ export default function App() {
           commitItems(updated);
           const x0 = tX(newItem.t0, rect.width) + rect.left;
           const x1 = tX(newItem.t1, rect.width) + rect.left;
-          setLabelEditor({ id: newItem.id, isWord, text: '', x: (x0 + x1) / 2, y: e.clientY, boxW: Math.max(80, x1 - x0) });
+          const tierType = getTierType(tierId);
+          setLabelEditor({ id: newItem.id, tierId, tierType, text: '', x: (x0 + x1) / 2, y: e.clientY, boxW: Math.max(80, x1 - x0) });
           redraw();
         }
         return;
@@ -1271,7 +1439,8 @@ export default function App() {
       if (e.detail === 2) {
         const x0 = tX(item.t0, rect.width) + rect.left;
         const x1 = tX(item.t1, rect.width) + rect.left;
-        setLabelEditor({ id: item.id, isWord, text: item.text, x: (x0 + x1) / 2, y: e.clientY, boxW: Math.max(80, x1 - x0) });
+        const tierType = tierId === 'phones' ? 'phone' : (tierId === 'words' ? 'word' : 'custom');
+        setLabelEditor({ id: item.id, tierId, tierType, text: item.text, x: (x0 + x1) / 2, y: e.clientY, boxW: Math.max(80, x1 - x0) });
         return;
       }
 
@@ -1375,7 +1544,8 @@ export default function App() {
         const rect = canvas.getBoundingClientRect();
         const x0 = tX(item.t0, rect.width) + rect.left;
         const x1 = tX(item.t1, rect.width) + rect.left;
-        setLabelEditor({ id: item.id, isWord, text: item.text, x: (x0 + x1) / 2, y: e.clientY, boxW: Math.max(80, x1 - x0) });
+        const tierType = tierId === 'phones' ? 'phone' : (tierId === 'words' ? 'word' : 'custom');
+        setLabelEditor({ id: item.id, tierId, tierType, text: item.text, x: (x0 + x1) / 2, y: e.clientY, boxW: Math.max(80, x1 - x0) });
       });
 
       menuItem('Merge with next', () => {
@@ -1415,11 +1585,11 @@ export default function App() {
       canvas.removeEventListener('mousedown', onMouseDown);
       canvas.removeEventListener('contextmenu', onContextMenu);
     };
-  }, [hitTest, tX, xT, drawTier, redraw, pushUndo]);
+  }, [hitTest, tX, xT, drawTier, redraw, pushUndo, commitTierItems]);
 
   useEffect(() => {
-    const c1 = addTierEditInteraction(wordsCanvasRef.current,  wordsRef,  true);
-    const c2 = addTierEditInteraction(phonesCanvasRef.current, phonesRef, false);
+    const c1 = addTierEditInteraction(wordsCanvasRef.current,  wordsRef,  true,  'words');
+    const c2 = addTierEditInteraction(phonesCanvasRef.current, phonesRef, false, 'phones');
     return () => { c1(); c2(); };
   }, [addTierEditInteraction, words, phones]);
 
@@ -1448,6 +1618,39 @@ export default function App() {
     };
   }, [loadAudio, loadTextGrid]);
 
+  // ── Custom tier canvas interactions ──────────────────────────────────
+  useEffect(() => {
+    const cleanups = [];
+    for (const tier of customTiersRef.current) {
+      const cv = customCanvasRefs.current[tier.id];
+      if (!cv) continue;
+      // Create a stable per-tier ref-like object
+      const tierItemsRef = { current: tier.items };
+      // Keep in sync: when customTiersRef changes, this ref stays fresh via closure
+      Object.defineProperty(tierItemsRef, 'current', {
+        get: () => {
+          const t = customTiersRef.current.find(t => t.id === tier.id);
+          return t ? t.items : [];
+        },
+        set: (v) => {
+          const ct = customTiersRef.current.map(t => t.id === tier.id ? { ...t, items: v } : t);
+          customTiersRef.current = ct;
+          setCustomTiers([...ct]);
+        },
+        configurable: true,
+      });
+      const c1 = addInteraction(cv, false);
+      const c2 = addHover(cv, () => {
+        const t = customTiersRef.current.find(t => t.id === tier.id);
+        return t ? t.items : [];
+      });
+      const c3 = addTierEditInteraction(cv, tierItemsRef, false, tier.id);
+      cleanups.push(c1, c2, c3);
+    }
+    return () => cleanups.forEach(c => c && c());
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [addInteraction, addHover, addTierEditInteraction, customTiers]);
+
   // ── Toolbar handlers ──────────────────────────────────────────────────
 
   const handleColormapChange = useCallback((name) => {
@@ -1472,14 +1675,14 @@ export default function App() {
   const commitLabel = useCallback((newText) => {
     const ed = labelEditor;
     if (!ed) return;
-    const itemsRef2 = ed.isWord ? wordsRef : phonesRef;
-    const updated = itemsRef2.current.map(it => it.id === ed.id ? { ...it, text: newText } : it);
-    itemsRef2.current = updated;
-    if (ed.isWord) { wordsRef.current = updated; setWords([...updated]); }
-    else           { phonesRef.current = updated; setPhones([...updated]); }
+    const src = ed.tierId === 'words' ? wordsRef.current
+              : ed.tierId === 'phones' ? phonesRef.current
+              : (customTiersRef.current.find(t => t.id === ed.tierId)?.items ?? []);
+    const updated = src.map(it => it.id === ed.id ? { ...it, text: newText } : it);
+    commitTierItems(ed.tierId, updated);
     setLabelEditor(null);
     redraw();
-  }, [labelEditor, redraw]);
+  }, [labelEditor, commitTierItems, redraw]);
 
   // ── MFA alignment ─────────────────────────────────────────────────────────
 
@@ -1744,31 +1947,39 @@ export default function App() {
       )}
 
       {/* Floating label editor input */}
-      {labelEditor && (
-        <div style={{
-          position: 'fixed',
-          left: labelEditor.x - labelEditor.boxW / 2,
-          top: labelEditor.y - 18,
-          zIndex: 5000,
-        }}>
-          <input
-            autoFocus
-            defaultValue={labelEditor.text}
-            style={{
-              width: labelEditor.boxW,
-              background: '#1e1e26', color: '#e8e6e1',
-              border: '1.5px solid #3a7bd5', borderRadius: 4,
-              padding: '3px 6px', fontSize: 13, fontFamily: 'Inter,sans-serif',
-              outline: 'none', textAlign: 'center',
-            }}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') commitLabel(e.target.value);
-              if (e.key === 'Escape') setLabelEditor(null);
-            }}
-            onBlur={(e) => commitLabel(e.target.value)}
-          />
-        </div>
-      )}
+      {labelEditor && (() => {
+        const labelInputRef = { current: null };
+        const left = labelEditor.x - labelEditor.boxW / 2;
+        const top  = labelEditor.y - 18;
+        return (
+          <div style={{ position: 'fixed', left, top, zIndex: 5000 }}>
+            <input
+              autoFocus
+              ref={el => { labelInputRef.current = el; }}
+              defaultValue={labelEditor.text}
+              style={{
+                width: labelEditor.boxW,
+                background: '#1e1e26', color: '#e8e6e1',
+                border: '1.5px solid #3a7bd5', borderRadius: 4,
+                padding: '3px 6px', fontSize: 13, fontFamily: 'Inter,sans-serif',
+                outline: 'none', textAlign: 'center',
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') commitLabel(e.target.value);
+                if (e.key === 'Escape') setLabelEditor(null);
+              }}
+              onBlur={(e) => {
+                // delay so IPA key clicks register before blur fires
+                setTimeout(() => {
+                  if (document.activeElement !== labelInputRef.current)
+                    commitLabel(e.target.value);
+                }, 150);
+              }}
+            />
+            {labelEditor.tierType === 'phone' && <IpaKeyboard inputRef={labelInputRef} />}
+          </div>
+        );
+      })()}
 
       <div className="toolbar">
         <div className="logo">Annotation Viewer <span>Bluey · 280–350s</span></div>
@@ -1936,6 +2147,27 @@ export default function App() {
         <button className="btn" onClick={exportTextGrid} title="Export TextGrid">
           ↓ Export
         </button>
+        {/* ── Add Tier button + inline popover ─────────────────────── */}
+        <div style={{ position: 'relative' }}>
+          <button
+            className="btn"
+            onClick={() => setShowTierManager(v => !v)}
+            title="Add a custom tier"
+          >
+            + Tier
+          </button>
+          {showTierManager && (
+            <TierNamePopover
+              onAdd={(name) => {
+                const newTier = { id: nextId(), name, visible: true, items: [] };
+                customTiersRef.current = [...customTiersRef.current, newTier];
+                setCustomTiers([...customTiersRef.current]);
+                setShowTierManager(false);
+              }}
+              onClose={() => setShowTierManager(false)}
+            />
+          )}
+        </div>
         <label className="load-btn">
           🎵 Load audio
           <input type="file" accept=".wav,.mp3,.flac,.m4a,.ogg" onChange={handleAudioFile} />
@@ -2030,25 +2262,119 @@ export default function App() {
         </div>
 
         <div className="tiers" ref={tiersDivRef}>
-          <div className="tier" ref={wrdTierRef}>
-            <div className="tier-gutter">WRD</div>
+          {/* ── Tier visibility bar — always visible ── */}
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: 6,
+            padding: '2px 8px', background: '#13131a',
+            borderBottom: '1px solid #1e1e24', flexShrink: 0, height: 22,
+          }}>
+            <span style={{ fontSize: 9, color: '#45454d', fontFamily: "'JetBrains Mono',monospace", marginRight: 4 }}>SHOW</span>
+            {[
+              { label: 'WRD', visible: wordsVisible, toggle: v => setWordsVisible(v) },
+              { label: 'PHN', visible: phonesVisible, toggle: v => setPhonesVisible(v) },
+              ...customTiers.map(t => ({
+                label: t.name.toUpperCase().slice(0, 4),
+                visible: t.visible,
+                toggle: v => {
+                  const ct = customTiersRef.current.map(x => x.id === t.id ? { ...x, visible: v } : x);
+                  customTiersRef.current = ct; setCustomTiers([...ct]);
+                },
+              })),
+            ].map(({ label, visible, toggle }) => (
+              <label key={label} style={{ display: 'flex', alignItems: 'center', gap: 3, cursor: 'pointer' }}>
+                <input
+                  type="checkbox"
+                  className="tier-visibility-check"
+                  checked={visible}
+                  onChange={e => toggle(e.target.checked)}
+                />
+                <span style={{ fontSize: 9, fontFamily: "'JetBrains Mono',monospace", color: visible ? '#c8c6c1' : '#45454d' }}>{label}</span>
+              </label>
+            ))}
+          </div>
+
+          <div className="tier" ref={wrdTierRef} style={wordsVisible ? {} : { display: 'none' }}>
+            <div className="tier-gutter"><span>WRD</span></div>
             <canvas ref={wordsCanvasRef} />
           </div>
           <div
             className="tier-divider"
             {...makeDragDivider(
-              (el) => el.closest('.tiers'),
+              (el) => el.parentElement,
               (ev, rect) => {
-                const fraction = Math.max(0.1, Math.min(0.9, (ev.clientY - rect.top) / rect.height));
+                const wrdH = wrdTierRef.current?.getBoundingClientRect().height ?? 0;
+                const phnH = phnTierRef.current?.getBoundingClientRect().height ?? 0;
+                const total = wrdH + phnH;
+                if (total < 1) return;
+                const wrdRect = wrdTierRef.current.getBoundingClientRect();
+                const newWrdH = ev.clientY - wrdRect.top;
+                const fraction = Math.max(0.1, Math.min(0.9, newWrdH / total));
                 wrdTierRef.current.style.flex = String(fraction);
                 phnTierRef.current.style.flex = String(1 - fraction);
               }
             )}
           />
-          <div className="tier" ref={phnTierRef}>
-            <div className="tier-gutter">PHN</div>
+          <div className="tier" ref={phnTierRef} style={phonesVisible ? {} : { display: 'none' }}>
+            <div className="tier-gutter"><span>PHN</span></div>
             <canvas ref={phonesCanvasRef} />
           </div>
+          {customTiers.map((tier, idx) => {
+            // The tier immediately above this divider
+            const aboveRef = idx === 0 ? phnTierRef : { current: customTierDivRefs.current[customTiers[idx - 1].id] };
+            const belowId = tier.id;
+            return (
+              <React.Fragment key={tier.id}>
+                <div
+                  className="tier-divider"
+                  {...makeDragDivider(
+                    (el) => el.parentElement,
+                    (ev) => {
+                      const aboveEl = aboveRef.current;
+                      const belowEl = customTierDivRefs.current[belowId];
+                      if (!aboveEl || !belowEl) return;
+                      const aboveRect = aboveEl.getBoundingClientRect();
+                      const belowRect = belowEl.getBoundingClientRect();
+                      const total = aboveRect.height + belowRect.height;
+                      if (total < 1) return;
+                      const newAboveH = ev.clientY - aboveRect.top;
+                      const fraction = Math.max(0.1, Math.min(0.9, newAboveH / total));
+                      aboveEl.style.flex = String(fraction);
+                      belowEl.style.flex = String(1 - fraction);
+                    }
+                  )}
+                />
+                <div
+                  className="tier"
+                  ref={el => {
+                    if (el) customTierDivRefs.current[tier.id] = el;
+                    else delete customTierDivRefs.current[tier.id];
+                  }}
+                  style={tier.visible ? {} : { display: 'none' }}
+                >
+                  <div className="tier-gutter" style={{ flexDirection: 'column', gap: 2 }}>
+                    <span style={{ maxWidth: 44, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 9 }} title={tier.name}>
+                      {tier.name.toUpperCase().slice(0, 4)}
+                    </span>
+                    <button
+                      className="tier-delete-btn"
+                      onClick={() => {
+                        const ct = customTiersRef.current.filter(t => t.id !== tier.id);
+                        customTiersRef.current = ct;
+                        setCustomTiers([...ct]);
+                      }}
+                      title={`Delete tier "${tier.name}"`}
+                    >×</button>
+                  </div>
+                  <canvas
+                    ref={el => {
+                      if (el) customCanvasRefs.current[tier.id] = el;
+                      else delete customCanvasRefs.current[tier.id];
+                    }}
+                  />
+                </div>
+              </React.Fragment>
+            );
+          })}
         </div>
 
         </div>{/* timeline-body */}
@@ -2170,6 +2496,7 @@ export default function App() {
           </div>
         </div>
       )}
+
     </>
   );
 }

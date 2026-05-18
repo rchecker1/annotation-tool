@@ -1,6 +1,6 @@
 # Annotation Tool — Developer Handoff
 
-A browser-based audio annotation viewer and editor for Praat TextGrid files. Built with React + Vite. No backend. All computation runs either on the main thread or in Web Workers.
+A browser-based audio annotation viewer and editor for Praat TextGrid files. Built with React + Vite. No backend except an optional MFA Flask server (`mfa_server.py`) on port 5050. All computation runs on the main thread or in Web Workers.
 
 ---
 
@@ -13,11 +13,11 @@ npm run dev        # http://localhost:5173
 npm run build      # production output → dist/
 ```
 
-On startup the app auto-loads two bundled files from `public/`:
-- `Bluey_blueyp1aud_region280-350s.wav` — demo audio
-- `Bluey_blueyp1aud_region280–350s_original.TextGrid` — demo annotations
+On startup the app scans `public/` via a Vite dev-server middleware (`/api/public-files`) and auto-loads the first `.wav` + `.TextGrid` pair it finds. Drop your own files onto the page, or use the Load buttons in the toolbar.
 
-Drop your own `.wav`/`.mp3`/`.flac` or `.TextGrid` onto the page, or use the Load buttons.
+Place files in `public/` — the app enforces exactly one `.wav` and one `.TextGrid` at startup and warns if the folder is empty or mismatched.
+
+IPA key layout is read from `public/ipa_keys.json` — a flat JSON array, one string per entry. Edit that file to add/remove keys from the virtual keyboard.
 
 ---
 
@@ -32,7 +32,12 @@ src/
   specWorker.js       Web Worker: mel spectrogram → RGBA pixels
   formantWorker.js    Web Worker: LPC formant tracking → F1/F2/F3 arrays
   canvasUtils.js      setupCanvas() (HiDPI), fmtTime()
-  index.css           All styles
+  index.css           All styles (uses CSS custom properties — see :root block at top)
+
+public/
+  *.wav               Audio file (exactly one expected)
+  *.TextGrid          Annotation file (exactly one expected)
+  ipa_keys.json       IPA virtual keyboard keys, one per array entry
 ```
 
 ---
@@ -47,6 +52,7 @@ Every hot-path value has **both** a `useState` and a `useRef`. The state drives 
 |---|---|---|
 | `words` | `wordsRef` | Word tier items |
 | `phones` | `phonesRef` | Phoneme tier items |
+| `customTiers` | `customTiersRef` | User-created custom tiers (array of `{id, name, visible, items}`) |
 | `duration` | `durationRef` | Audio duration in seconds |
 | `editMode` | `editModeRef` | Edit vs select mode |
 | `loopMode` | `loopModeRef` | Loop playback |
@@ -61,25 +67,22 @@ Every hot-path value has **both** a `useState` and a `useRef`. The state drives 
 
 All visuals are drawn on `<canvas>` elements via the Canvas 2D API. There is no SVG or DOM-based rendering. Every canvas is managed by `setupCanvas()` which handles HiDPI scaling — always call it at the start of a draw function and use the returned `{ ctx, w, h }` (CSS pixels, not device pixels).
 
-The draw functions:
-
 | Function | Canvas | What it draws |
 |---|---|---|
-| `drawWave` | `waveCanvasRef` | Waveform (3 LOD modes: line, min/max bars, peak envelope) + RMS overlay |
-| `drawSpec` | `specCanvasRef` | Blits a cached spectrogram strip + formant lines + frequency labels |
+| `drawWave` | `waveCanvasRef` | Waveform (3 LOD modes) + RMS overlay |
+| `drawSpec` | `specCanvasRef` | Blits cached spectrogram strip + formant lines + frequency labels |
 | `drawRuler` | `rulerCanvasRef` | Time axis with adaptive tick spacing |
-| `drawTier` | `wordsCanvasRef` / `phonesCanvasRef` | Annotation tiles with multi-row stacking, confidence color coding |
-| `drawMinimap` | `minimapCanvasRef` | Full-duration overview with confidence-colored word tiles + viewport box |
-| `drawOverlay` | `overlayCanvasRef` | Playhead line drawn on a full-timeline overlay canvas during playback |
+| `drawTier` | `wordsCanvasRef` / `phonesCanvasRef` / custom canvas refs | Annotation tiles with multi-row stacking, confidence color coding |
+| `drawMinimap` | `minimapCanvasRef` | Full-duration overview with viewport box |
+| `drawOverlay` | `overlayCanvasRef` | Playhead line only (separate overlay canvas) |
 
-`redraw()` calls all five non-overlay draws. During playback the RAF loop calls `drawOverlay()` for the playhead, and `redraw()` only when the view scrolls.
+`redraw()` calls all draws except the overlay. During playback, the RAF loop calls `drawOverlay()` and only calls `redraw()` when the view scrolls.
 
 ### View coordinates
 
-`viewRef.current = { t0, t1 }` defines the visible time window in seconds.
+`viewRef.current = { t0, t1 }` — visible time window in seconds.
 
-Two helpers convert between time and pixel space:
-- `tX(t, w)` — time → x pixel (given canvas CSS width `w`)
+- `tX(t, w)` — time → x pixel
 - `xT(x, w)` — x pixel → time
 
 ---
@@ -88,7 +91,7 @@ Two helpers convert between time and pixel space:
 
 ### Annotation items
 
-Each item in `wordsRef.current` / `phonesRef.current` is a plain object:
+Each item in any tier's items array is a plain object:
 
 ```js
 {
@@ -97,23 +100,109 @@ Each item in `wordsRef.current` / `phonesRef.current` is a plain object:
   t1: number,       // end time in seconds
   text: string,     // label
   row: number,      // stacking row (0 = top), assigned by assignRows()
-  score?: number,   // confidence 0–1, present on word items parsed from Whisper TextGrid
+  score?: number,   // confidence 0–1, present on word items from Whisper TextGrid
 }
 ```
 
-`assignRows(items)` sorts by `t0` and greedily assigns rows with a 1ms tolerance for floating-point artifacts from TextGrid files. It mutates `item.row` in-place and returns the sorted array.
+`assignRows(items)` sorts by `t0` and greedily assigns rows with a 1ms tolerance.
 
-`withIds(items)` stamps items with stable ids on load (preserves existing ids on re-load).
+### Custom tiers
 
-### TextGrid parsing
+Stored in `customTiersRef.current` as:
 
-`parseTextGrid(text)` returns `{ duration, tiers }` where `tiers` is an object keyed by tier name (original capitalisation). `loadTextGrid` normalises keys to lowercase before lookup, so `"Words"`, `"words"`, `"WORDS"` all work.
+```js
+{
+  id: string,       // unique tier id (e.g. 't_1716000000000')
+  name: string,     // display name (user-provided)
+  visible: boolean, // whether the tier div is shown
+  items: [...],     // same item shape as words/phones
+}
+```
 
-Supported non-standard field: `score = 0.6540` on word intervals (Whisper output format).
+Custom tiers are read from TextGrid on load (any tier that isn't `words`/`phones`), and written back on export.
 
-### TextGrid serialisation
+Canvas refs for custom tiers: `customCanvasRefs.current[tierId]`  
+DOM div refs for custom tiers: `customTierDivRefs.current[tierId]`
 
-`serializeTextGrid(duration, wordItems, phoneItems)` fills gaps between items with empty intervals so the output is a valid Praat TextGrid. Export via the ↓ Export button.
+### Shared helpers
+
+```js
+// Module-level (top of App.jsx)
+const getTierType = (tierId) =>
+  tierId === 'phones' ? 'phone' : tierId === 'words' ? 'word' : 'custom';
+
+// Inside App component (useCallback)
+const commitTierItems = useCallback((tierId, updated) => {
+  if (tierId === 'words') {
+    wordsRef.current = updated; setWords([...updated]);
+  } else if (tierId === 'phones') {
+    phonesRef.current = updated; setPhones([...updated]);
+  } else {
+    const ct = customTiersRef.current.map(t =>
+      t.id === tierId ? { ...t, items: updated } : t
+    );
+    customTiersRef.current = ct; setCustomTiers([...ct]);
+  }
+}, []);
+```
+
+Use `commitTierItems` for every tier write operation — it handles all three cases uniformly.
+
+### TextGrid parsing and serialisation
+
+`parseTextGrid(text)` returns `{ duration, tiers }`. `loadTextGrid` lowercases keys before lookup, so `"Words"` / `"words"` / `"WORDS"` all work. Any tier that isn't `words` or `phones` becomes a custom tier.
+
+`serializeTextGrid(duration, wordItems, phoneItems, customTiers)` fills gaps with empty intervals for valid Praat output. Export via the ↓ Export button.
+
+---
+
+## Tier Visibility
+
+There is always-visible bar at the top of the `.tiers` section with checkboxes for WRD, PHN, and each custom tier. The tier div itself is `display: none` when hidden — the checkbox stays visible because it lives in the bar above the tier divs, not inside them.
+
+`wordsVisible` / `phonesVisible` state controls the WRD/PHN divs. Each custom tier has a `visible` field on its object.
+
+---
+
+## Tier Resize Dividers
+
+`makeDragDivider(getContainer, onMove)` attaches `mousedown`/`mousemove`/`mouseup` to a divider element and calls `onMove(ev)` on each drag tick.
+
+**WRD/PHN divider** measures actual `getBoundingClientRect()` heights of `wrdTierRef` and `phnTierRef` to compute the fraction — do not use the parent container rect, as the visibility bar above the tiers throws off the math.
+
+**Custom tier dividers** are wired in the `useEffect([customTiers])` — each divider measures the tier above (`phnTierRef` for the first, or the previous custom tier's div ref) and the tier below.
+
+---
+
+## IPA Virtual Keyboard
+
+`IpaKeyboard({ inputRef })` component:
+- Fetches `/ipa_keys.json` on first render, renders one button per key.
+- `onMouseDown: e.preventDefault()` prevents the label editor input from blurring when a key is clicked.
+- Inserts at cursor using the native input setter trick (`Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(...)`).
+- Only shown when `labelEditor.tierType === 'phone'` (i.e. the PHN tier).
+- The label editor `onBlur` has a 150ms delay to allow IPA key click to fire first.
+
+To change the key set: edit `public/ipa_keys.json`. Format: flat JSON array, one string per entry.
+
+---
+
+## MFA Queue System
+
+MFA (Montreal Forced Aligner) runs via `mfa_server.py` on `http://localhost:5050`.
+
+State:
+```js
+const [mfaQueue, setMfaQueue] = useState([]);  // {id,label,segT0,segT1,targetWords,status,error}
+const mfaQueueRef = useRef([]);
+const mfaProcessingRef = useRef(false);
+```
+
+- Max 4 items in queue (pending + running combined). Attempting to add a 5th shows an error toast.
+- `enqueueRunMfa(targetWords, sel)` adds a job and calls `processNextMfaJob()`.
+- `processNextMfaJob()` picks the next `'pending'` job, marks it `'running'`, runs it, then recursively calls itself.
+- The MFA button label shows `⟳ <word> <t0>–<t1>s` when a job is active. A badge shows queue depth with a dropdown listing all pending/running/errored jobs.
+- Errors appear as a small fixed pill (bottom-right, max 380px wide), not a large centered banner.
 
 ---
 
@@ -126,11 +215,11 @@ Two-level cache:
 | Base | `baseSpecCacheRef` | Full audio duration | Low-res (N_FFT=2048, hop=512) |
 | Local | `spectroCacheRef` | Current view ± 1× padding | High-res (adaptive N_FFT) |
 
-On audio load, `calcBaseSpec()` fires automatically and populates the base cache. The user clicks **⟳ Calc Spec** to compute a high-res strip for the current view via `calcSpecForView()`.
+**Worker protocol** (`specWorker.js`):
+- Input: `{ ch, sr, t0, t1, hop, N_FFT, pw, ph, colormapName, regionT0, id }`
+- Output: `{ pixels, pw, ph, stripT0, stripT1, regionT0, id }` — transferred zero-copy
 
-`drawSpec()` checks local cache first, falls back to base. Both are stored as offscreen `<canvas>` elements; drawing is a single `ctx.drawImage()` blit.
-
-**Adaptive N_FFT** in `calcSpecForView` (smaller = sharper time resolution when zoomed in):
+**Adaptive N_FFT** in `calcSpecForView`:
 
 | Samples in view | N_FFT |
 |---|---|
@@ -140,102 +229,68 @@ On audio load, `calcBaseSpec()` fires automatically and populates the base cache
 | < 80 000 | 1 024 |
 | ≥ 80 000 | 2 048 |
 
-The strip computed is 3× the view width (1 view-width padding on each side) so normal panning doesn't immediately miss cache.
-
-**Worker protocol** (`specWorker.js`):
-- Input: `{ ch: Float32Array, sr, t0, t1, hop, N_FFT, pw, ph, colormapName, regionT0, id }`
-- Output: `{ pixels: Uint8ClampedArray, pw, ph, stripT0, stripT1, regionT0, id }` — transferred zero-copy
-- Result is rendered into an offscreen canvas by `pixelsToCanvas(res)` and stored in the cache.
-
 ---
 
 ## Formant Tracking
 
-`calcFormantForView()` sends the current view's audio to `formantWorker.js` which runs LPC (order 12, 1024-sample frames, 256-sample hop) and returns F1/F2/F3 arrays. `drawSpec()` overlays these as coloured polylines when `showFormantsRef.current` is true.
+`formantWorker.js` runs LPC (order 12, 1024-sample frames, 256-sample hop).
 
-**Worker protocol** (`formantWorker.js`):
-- Input: `{ ch: Float32Array, sr, regionT0, id }`
-- Output: `{ f1, f2, f3, frames, hop, sr, regionT0, id }` — f1/f2/f3 transferred zero-copy
+**Worker protocol**:
+- Input: `{ ch, sr, regionT0, id }`
+- Output: `{ f1, f2, f3, frames, hop, sr, regionT0, id }` — transferred zero-copy
 
 ---
 
 ## Playback
 
-Web Audio API. `startPlay(from)`:
-1. Calls `stopAudio()` to kill any existing source
-2. Creates an `AudioBufferSourceNode`, sets `playbackRate.value`
-3. `src.start(0, from, to - from)` — the duration argument is always source content time, never divided by rate (the browser handles rate internally)
-4. RAF loop (`tick`) advances `playheadRef` by `(ctx.currentTime - startCtxTime) * playbackRate`
-5. On `src.onended`, stops cleanly; loops if loop mode is on and a selection exists
+Web Audio API. AudioContext autoplay policy: `ctx.state` may be `'suspended'` on first play. `startPlay` calls `ctx.resume().then(doStart)` when suspended.
 
-**Playback rate**: 0.25×, 0.5×, 0.75×, 1×, 1.25×, 1.5×, 2× via dropdown. Changing rate while playing restarts from current playhead.
+`getAudioCtx()` recreates the context if `ctx.state === 'closed'`.
 
-**Selection**: drawn by `drawSelectionRect`. Pressing Play (button or Space) always starts from `sel.t0` when a selection exists — after a region finishes, re-pressing Play restarts from the region start.
+**Playback rate**: 0.25×–2× via dropdown. Changing rate while playing restarts from current playhead.
+
+`src.start(0, from, duration)` — the duration arg is source content time. Do **not** divide by `playbackRate`; the browser handles rate internally.
 
 ---
 
 ## Edit Mode
 
-Toggled by the **✎ Edit** button or the configurable keyboard shortcut (default F1). `editModeRef.current` is the authoritative source; `editMode` state drives the button label.
+Toggled by **✎ Edit** button or the configurable keyboard shortcut (default F1).
 
-All editing is handled by `addTierEditInteraction(canvas, itemsRef, isWord)` which registers four event listeners on each tier canvas:
+`addTierEditInteraction(canvas, itemsRef, isWord, tierId)` registers listeners on each tier canvas:
 
 | Event | Behaviour |
 |---|---|
-| `mousemove` | Cursor feedback (ew-resize / grab / crosshair), yellow edge highlight |
+| `mousemove` | Cursor feedback, yellow edge highlight |
 | `mouseleave` | Reset cursor and hover state |
-| `mousedown` | Seek/select (non-edit mode) or drag boundary / drag body / create item (edit mode) |
-| `contextmenu` | Rename / Merge with next / Delete menu |
+| `mousedown` | Seek/select (non-edit) or drag boundary/body/create (edit) |
+| `contextmenu` | Rename / Merge with next / Delete |
 
-**Hit testing** (`hitTest`): checks each item's row band (y), then within 6px of `t0`/`t1` edges returns `side: 'left'|'right'`; otherwise interior returns `side: 'body'`.
+**Committing edits**: use `commitTierItems(tierId, updated)` inside this function.
 
-**Committing edits**: the inner helper `commitItems(updated)` handles the three-way update:
-```js
-itemsRef.current = updated;
-if (isWord) { wordsRef.current = updated; setWords([...updated]); }
-else        { phonesRef.current = updated; setPhones([...updated]); }
-```
+**Undo**: `pushUndo()` snapshots words + phones + customTiers (max 100). Ctrl/Cmd+Z fires `popUndo()` + `redraw()`.
 
-**Undo**: `pushUndo()` snapshots both tiers (max 100). `popUndo()` restores. Ctrl/Cmd+Z fires `popUndo()` + `redraw()`.
-
-**Double-click empty space** → creates a new tile centred on cursor, immediately opens label editor.  
-**Double-click tile** → opens inline label editor (floating `<input>`).  
-**Drag edge** → updates the dragged item plus any adjacent item sharing that exact edge (so adjacent tiles stay gapless).  
-**Drag body** → moves the tile, re-runs `assignRows` to update stacking.
+**Double-click empty** → creates tile, opens label editor.  
+**Double-click tile** → opens inline label editor.  
+**Drag edge** → updates item + any adjacent item sharing that exact edge.  
+**Drag body** → moves tile, re-runs `assignRows`.
 
 ---
 
 ## Confidence Score Coloring
 
-Word tiles and the minimap are colored by `item.score` using `scoreColor(score, alpha)` (module-level in `App.jsx`):
-
+Word tiles colored by `item.score` via `scoreColor(score, alpha)`:
 - 0.0 → red `rgb(255, 0, 50)`
 - 0.5 → yellow `rgb(255, 200, 50)`
 - 1.0 → green `rgb(0, 200, 50)`
 
 Items without a score fall back to blue (words) or green (phonemes).
 
-The **◎ Scores** button toggles `ConfidenceDashboard` — a 200px side panel showing: stat grid (mean/median/min/max), 10-bin histogram, color legend, and 5 lowest-confidence words.
+**◎ Scores** button toggles `ConfidenceDashboard` — stat grid, 10-bin histogram, color legend, 5 lowest-confidence words.
 
 ---
 
-## Interaction System
-
-### Wheel / zoom / pan
-
-`addInteraction(canvas, seekable)` registers a `wheel` handler on every canvas (waveform, spectrogram, both tiers). Ctrl+scroll zooms anchored to cursor; plain scroll pans. The zoom slider syncs via `spanToSlider` / `sliderToSpan` (logarithmic mapping).
-
-Tier canvases pass `seekable: false` — their mousedown is handled exclusively by `addTierEditInteraction`.
-
-### Minimap
-
-Click or drag on the minimap to pan the view. `getBoundingClientRect` is cached in `onDown` and reused for the whole drag.
-
-### Hover popup
-
-`addHover(canvas, isWord)` shows a floating tooltip with token text, timestamps, and duration. It reads `wordsRef.current`/`phonesRef.current` live inside the handler (not a snapshot), so it never goes stale and does not need re-registration on annotation edits.
-
-### Keyboard shortcuts
+## Keyboard Shortcuts
 
 | Key | Action |
 |---|---|
@@ -249,38 +304,52 @@ Click or drag on the minimap to pan the view. `getBoundingClientRect` is cached 
 
 ---
 
-## Colormaps
+## CSS
 
-Four options: **jet** (default), **inferno**, **viridis**, **greys**. Defined in both `dsp.js` (main thread, used only by `buildMelSpectrogram`) and `specWorker.js` (worker, used for all pixel rendering). Changing colormap recomputes the base spec via `calcBaseSpec`.
+`index.css` uses CSS custom properties defined in `:root` at the top of the file:
+
+```css
+:root {
+  --bg, --bg-panel, --bg-ui, --bg-item  /* background layers */
+  --border, --border-ui, --border-ui2   /* border colors */
+  --text, --text-dim, --text-mute, --text-dark  /* text tones */
+  --accent                              /* #3a7bd5 blue */
+  --mono                                /* "JetBrains Mono", monospace */
+}
+```
+
+`.panel-divider` and `.tier-divider` share one rule. `.panel-gutter` and `.tier-gutter` share a base rule; `.tier-gutter` adds `flex-direction: column; gap: 3px`.
 
 ---
 
 ## Key Invariants and Non-Obvious Constraints
 
-- **`setupCanvas` must be called at the start of every draw function.** It resets the transform. Never call `ctx.scale()` or `ctx.transform()` without also calling `ctx.setTransform()` to reset — transforms stack and corrupt all subsequent drawing.
+- **`setupCanvas` must be called at the start of every draw function.** It resets the transform.
 
-- **`src.start(0, from, duration)` — the duration argument is source content time.** Do NOT divide it by `playbackRate`. The Web Audio API applies rate internally. Dividing would play a longer/shorter region than selected.
+- **`src.start(0, from, duration)` — do not divide duration by `playbackRate`.** The Web Audio API applies rate internally.
 
-- **`assignRows` uses a 1ms tolerance (`end - 0.001`)** to handle floating-point TextGrid artifacts where adjacent items have `t0 == prev.t1` but fail exact equality.
+- **`assignRows` uses a 1ms tolerance** (`end - 0.001`) for floating-point TextGrid artifacts.
 
-- **Tier canvases do NOT register `addInteraction` with `seekable: true`.** They use `addInteraction(canvas, false)` for wheel only. Their mousedown is handled inside `addTierEditInteraction` (select mode branch for seek, edit mode branch for editing). This avoids two conflicting mousedown handlers.
+- **Tier canvases use `addInteraction(canvas, false)`** (wheel only). Their mousedown is handled by `addTierEditInteraction`. This avoids two conflicting mousedown handlers.
 
-- **`drawOverlay` does NOT call `drawMinimap`.** The minimap is repainted by `redraw()` on view-scroll ticks. `drawOverlay` only updates the thin playhead line on the overlay canvas (a separate DOM element).
+- **`drawOverlay` does not call `drawMinimap`.** The minimap is repainted by `redraw()` on scroll ticks.
 
-- **The `useEffect([redraw])` dep array is intentionally `[redraw]` only**, not `[redraw, words, phones, duration]`. React state for words/phones/duration exists only to trigger toolbar re-renders. All draw functions read from refs. Adding state to the dep array causes double-draws on every edit drag.
+- **The `useEffect([redraw])` dep array is intentionally `[redraw]` only.** Draw functions read from refs. Adding state to the dep array causes double-draws on every edit drag.
 
-- **`addHover` does not take an `items` parameter** — it takes `isWord: boolean` and reads the live ref inside the handler. This avoids listener re-registration on every annotation state change.
+- **`addHover` takes a getter `() => items[]`**, not a snapshot — so it never goes stale without re-registration.
 
-- **`commitItems(updated)` inside `addTierEditInteraction`** handles all three-way ref+state updates for that tier. Use it for every edit operation inside that function.
+- **`commitTierItems(tierId, updated)`** is the single place to write any tier update. Do not write refs/state manually for tier items outside of this helper.
 
-- **Tier name lookup is case-insensitive.** `loadTextGrid` lowercases all keys before lookup, so `"Words"`, `"words"`, `"WORDS"` all resolve correctly.
+- **Tier name lookup is case-insensitive.** `loadTextGrid` lowercases all keys before lookup.
+
+- **AudioContext may be `'suspended'` or `'closed'`.** Always go through `getAudioCtx()` which recreates if closed, and always resume before starting a source node.
 
 ---
 
-## Things That Do Not Exist Yet (Known Gaps)
+## Known Gaps
 
 - No cross-tier boundary snapping (phoneme edges to word edges)
 - No waveform-level edit (only tier tiles)
 - No multi-file batch processing
-- `serializeTextGrid` does not preserve `score` fields on export (they are dropped)
-- `buildMelSpectrogram` in `dsp.js` is called on load but its result (`spectroRef`) is only used as a presence check in `drawSpec` — the actual pixel rendering goes through the worker cache
+- `serializeTextGrid` does not preserve `score` fields on export
+- `buildMelSpectrogram` in `dsp.js` is called on load but its result is only used as a presence check in `drawSpec` — actual pixel rendering goes through the worker cache
