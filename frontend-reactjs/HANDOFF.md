@@ -243,13 +243,42 @@ Two-level cache:
 
 ## Playback
 
-Web Audio API. AudioContext autoplay policy: `ctx.state` may be `'suspended'` on first play. `startPlay` calls `ctx.resume().then(doStart)` when suspended.
+Web Audio API. **Known in-progress issue: audio does not play on click (under active debugging).**
 
-`getAudioCtx()` recreates the context if `ctx.state === 'closed'`.
+### AudioContext lifecycle — critical detail
 
-**Playback rate**: 0.25×–2× via dropdown. Changing rate while playing restarts from current playhead.
+`loadAudio` decodes audio using a **temporary, immediately-closed** `AudioContext`:
+
+```js
+const tmpCtx = new (window.AudioContext || window.webkitAudioContext)();
+const buffer = await tmpCtx.decodeAudioData((await file.arrayBuffer()).slice(0));
+tmpCtx.close();
+audioBufferRef.current = buffer;
+```
+
+This is intentional: creating the real context before a user gesture leaves it permanently `'suspended'` in most browsers. The real context is created lazily inside `startPlay`, which is always called from a user gesture (Play button or Space key).
+
+`getAudioCtx()` creates a new context on first call or if the existing one is `'closed'`:
+
+```js
+const getAudioCtx = () => {
+  if (!audioCtxRef.current || audioCtxRef.current.state === 'closed')
+    audioCtxRef.current = new (window.AudioContext || window.webkitAudioContext)();
+  return audioCtxRef.current;
+};
+```
+
+`startPlay(from)` flow:
+1. `stopAudio()` — kills any existing source/RAF
+2. `getAudioCtx()` — get or create context
+3. If `ctx.state === 'suspended'`: `ctx.resume().then(doStart)`; else `doStart()` directly
+4. `doStart()` creates a `BufferSource`, connects it, calls `src.start(0, from, to - from)`, starts RAF
+
+**Debug logging is currently active** in `startPlay` — `console.log('[startPlay] ...')` lines are present. Remove them once the audio issue is resolved.
 
 `src.start(0, from, duration)` — the duration arg is source content time. Do **not** divide by `playbackRate`; the browser handles rate internally.
+
+**Playback rate**: 0.25×–2× via dropdown. Changing rate while playing restarts from current playhead.
 
 ---
 
@@ -342,12 +371,27 @@ Items without a score fall back to blue (words) or green (phonemes).
 
 - **Tier name lookup is case-insensitive.** `loadTextGrid` lowercases all keys before lookup.
 
-- **AudioContext may be `'suspended'` or `'closed'`.** Always go through `getAudioCtx()` which recreates if closed, and always resume before starting a source node.
+- **AudioContext must only be created inside a user gesture handler** (`startPlay`, which is called from onClick or keydown). Creating it during `useEffect` auto-load leaves it permanently `'suspended'`. The decode step uses a separate temporary context that is closed immediately after decode.
+
+- **`loadAudio` does NOT create the real AudioContext.** It uses `tmpCtx` only for decode. `audioCtxRef` is only populated when `startPlay` runs.
+
+- **Debug logs are present in `startPlay`** (`console.log('[startPlay] ...')`). Remove these once audio playback is confirmed working.
+
+---
+
+## Recent Changes (latest session)
+
+- **Removed attributes feature** — `AttrEditorModal` component, `attrEditor` state, "Edit attributes…" context menu item, `attrs: {}` on item creation, and `attr_key = "value"` lines in TextGrid serialization are all gone. Items no longer carry an `attrs` field.
+- **CSS custom properties** — `index.css` now has a `:root` block with `--bg`, `--accent`, `--mono`, etc. replacing ~40 repeated hex/font values.
+- **CSS deduplication** — `.panel-divider` and `.tier-divider` share one rule; `.panel-gutter` and `.tier-gutter` share a base rule; the duplicate `.tier-gutter` block is removed.
+- **Audio decode refactor** — `loadAudio` now decodes via a short-lived `tmpCtx` instead of the real `audioCtxRef`, to avoid creating the real context before a user gesture.
+- **Audio playback bug** — play button still not producing sound as of this session. Debug `console.log('[startPlay] ...')` lines are present in `startPlay`. Next step: open browser console, click Play, paste the log output to diagnose.
 
 ---
 
 ## Known Gaps
 
+- **Audio playback broken** — under active debugging (see above)
 - No cross-tier boundary snapping (phoneme edges to word edges)
 - No waveform-level edit (only tier tiles)
 - No multi-file batch processing

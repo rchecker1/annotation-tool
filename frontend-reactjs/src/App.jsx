@@ -129,7 +129,9 @@ function serializeTextGrid(duration, wordItems, phoneItems, customTiers = []) {
     let cursor = 0;
     for (const it of sorted) {
       if (it.t0 > cursor + 1e-9) intervals.push({ t0: cursor, t1: it.t0, text: '' });
-      intervals.push({ t0: it.t0, t1: it.t1, text: it.text });
+      const iv = { t0: it.t0, t1: it.t1, text: it.text };
+      if (it.score != null) iv.score = it.score;
+      intervals.push(iv);
       cursor = it.t1;
     }
     if (cursor < duration - 1e-9) intervals.push({ t0: cursor, t1: duration, text: '' });
@@ -145,12 +147,48 @@ function serializeTextGrid(duration, wordItems, phoneItems, customTiers = []) {
       lines.push(`            xmin = ${iv.t0.toFixed(6)}`);
       lines.push(`            xmax = ${iv.t1.toFixed(6)}`);
       lines.push(`            text = "${iv.text}"`);
+      if (iv.score != null) lines.push(`            score = ${iv.score}`);
     });
   });
 
   return lines.join('\n');
 }
 
+
+function ExportPopover({ defaultName, onExport, onClose }) {
+  const [name, setName] = useState(defaultName);
+  const doExport = () => {
+    const n = name.trim() || defaultName;
+    onExport(n.endsWith('.TextGrid') ? n : n + '.TextGrid');
+  };
+  return (
+    <div style={{
+      position: 'absolute', top: '100%', right: 0, marginTop: 4,
+      background: '#1e1e26', border: '1px solid #2e2e3a', borderRadius: 8,
+      padding: '10px 12px', zIndex: 8000, boxShadow: '0 4px 16px rgba(0,0,0,0.6)',
+      display: 'flex', flexDirection: 'column', gap: 8, minWidth: 260,
+    }}>
+      <div style={{ fontSize: 11, color: '#888', fontFamily: 'Inter,sans-serif' }}>Save as</div>
+      <input
+        autoFocus
+        value={name}
+        onChange={e => setName(e.target.value)}
+        onKeyDown={e => { if (e.key === 'Enter') doExport(); if (e.key === 'Escape') onClose(); }}
+        style={{
+          background: '#13131a', color: '#e8e6e1',
+          border: '1px solid #2e2e3a', borderRadius: 4,
+          padding: '5px 8px', fontSize: 12, fontFamily: "'JetBrains Mono',monospace", outline: 'none',
+        }}
+      />
+      <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
+        <button className="btn" onClick={onClose}
+          style={{ padding: '4px 10px', fontSize: 12, background: 'transparent' }}>Cancel</button>
+        <button className="btn" onClick={doExport}
+          style={{ padding: '4px 10px', fontSize: 12 }}>↓ Download</button>
+      </div>
+    </div>
+  );
+}
 
 function TierNamePopover({ onAdd, onClose }) {
   const [name, setName] = useState('');
@@ -313,6 +351,7 @@ export default function App() {
   const [wordsVisible, setWordsVisible]   = useState(true);
   const [phonesVisible, setPhonesVisible] = useState(true);
   const [showTierManager, setShowTierManager] = useState(false);
+  const [showExportPopover, setShowExportPopover] = useState(false);
   const MFA_SERVER = 'http://localhost:5050';
   const mfaQueueRef = useRef([]);
   const mfaProcessingRef = useRef(false);
@@ -353,6 +392,7 @@ export default function App() {
   const wordsRef         = useRef([]);
   const phonesRef        = useRef([]);
   const customTiersRef   = useRef([]);
+  const tgFileNameRef    = useRef('annotation');
   const customCanvasRefs = useRef({}); // keyed by tier id
   const customTierDivRefs = useRef({}); // keyed by tier id — the .tier div element
   const durationRef      = useRef(70);
@@ -1035,14 +1075,15 @@ export default function App() {
   }, [redraw]);
 
   // ── Export TextGrid ───────────────────────────────────────────────────
-  const exportTextGrid = useCallback(() => {
+  const doExportTextGrid = useCallback((filename) => {
     const text = serializeTextGrid(durationRef.current, wordsRef.current, phonesRef.current, customTiersRef.current);
     const blob = new Blob([text], { type: 'text/plain' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
-    a.href = url; a.download = 'annotation.TextGrid';
+    a.href = url; a.download = filename;
     a.click();
     URL.revokeObjectURL(url);
+    setShowExportPopover(false);
   }, []);
 
   // ── Effects ───────────────────────────────────────────────────────────
@@ -1087,6 +1128,7 @@ export default function App() {
       // Exactly one WAV (and zero or one TextGrid) — auto-load
       if (tgs.length === 1) {
         try {
+          tgFileNameRef.current = tgs[0].replace(/\.TextGrid$/i, '');
           const res = await fetch(`/${encodeURIComponent(tgs[0])}`);
           if (res.ok) loadTextGrid(await res.text());
         } catch(e) { console.warn('TextGrid load failed:', e); }
@@ -1601,6 +1643,7 @@ export default function App() {
       e.preventDefault(); setDropping(false);
       const f = e.dataTransfer.files[0]; if (!f) return;
       if (f.name.toLowerCase().endsWith('.textgrid')) {
+        tgFileNameRef.current = f.name.replace(/\.TextGrid$/i, '');
         const reader = new FileReader();
         reader.onload = (ev) => loadTextGrid(ev.target.result);
         reader.readAsText(f);
@@ -1666,6 +1709,7 @@ export default function App() {
   const handleAudioFile = (e) => { if (e.target.files[0]) loadAudio(e.target.files[0]); };
   const handleTGFile    = (e) => {
     const f = e.target.files[0]; if (!f) return;
+    tgFileNameRef.current = f.name.replace(/\.TextGrid$/i, '');
     const reader = new FileReader();
     reader.onload = (ev) => loadTextGrid(ev.target.result);
     reader.readAsText(f);
@@ -2144,9 +2188,23 @@ export default function App() {
             </div>
           );
         })()}
-        <button className="btn" onClick={exportTextGrid} title="Export TextGrid">
-          ↓ Export
-        </button>
+        {/* ── Export button + filename popover ─────────────────────── */}
+        <div style={{ position: 'relative' }}>
+          <button
+            className="btn"
+            onClick={() => setShowExportPopover(v => !v)}
+            title="Export TextGrid"
+          >
+            ↓ Export
+          </button>
+          {showExportPopover && (
+            <ExportPopover
+              defaultName={tgFileNameRef.current}
+              onExport={doExportTextGrid}
+              onClose={() => setShowExportPopover(false)}
+            />
+          )}
+        </div>
         {/* ── Add Tier button + inline popover ─────────────────────── */}
         <div style={{ position: 'relative' }}>
           <button
