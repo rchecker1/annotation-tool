@@ -3,7 +3,7 @@ import { parseTextGrid } from './parseTextGrid.js';
 import { setupCanvas, fmtTime } from './canvasUtils.js';
 import {
   COLORMAPS, inferno,
-  buildMelSpectrogram, buildRmsEnvelope, buildFormantTrack,
+  buildMelSpectrogram, buildRmsEnvelope,
 } from './dsp.js';
 
 
@@ -155,18 +155,30 @@ function serializeTextGrid(duration, wordItems, phoneItems, customTiers = []) {
 }
 
 
-function ExportPopover({ defaultName, onExport, onClose }) {
+function ExportPopover({ defaultName, customTiers, onExport, onClose }) {
   const [name, setName] = useState(defaultName);
+  const [pratCompat, setPraat] = useState(false);
+  const [fullExport, setFull]  = useState(true);
+  const neitherSelected = !pratCompat && !fullExport;
   const doExport = () => {
-    const n = name.trim() || defaultName;
-    onExport(n.endsWith('.TextGrid') ? n : n + '.TextGrid');
+    if (neitherSelected) return;
+    const stem = name.trim() || defaultName;
+    const base = stem.replace(/\.TextGrid$/i, '');
+    if (pratCompat) onExport(`${base}_praat.TextGrid`, false);
+    if (fullExport)  onExport(`${base}.TextGrid`,       true);
   };
+  const rowStyle = (active) => ({
+    display: 'flex', alignItems: 'flex-start', gap: 8, padding: '7px 10px',
+    borderRadius: 5, cursor: 'pointer',
+    background: active ? '#1a1a24' : 'transparent',
+    border: `1px solid ${active ? '#2e2e3a' : 'transparent'}`,
+  });
   return (
     <div style={{
       position: 'absolute', top: '100%', right: 0, marginTop: 4,
       background: '#1e1e26', border: '1px solid #2e2e3a', borderRadius: 8,
       padding: '10px 12px', zIndex: 8000, boxShadow: '0 4px 16px rgba(0,0,0,0.6)',
-      display: 'flex', flexDirection: 'column', gap: 8, minWidth: 260,
+      display: 'flex', flexDirection: 'column', gap: 8, minWidth: 280,
     }}>
       <div style={{ fontSize: 11, color: '#888', fontFamily: 'Inter,sans-serif' }}>Save as</div>
       <input
@@ -180,11 +192,40 @@ function ExportPopover({ defaultName, onExport, onClose }) {
           padding: '5px 8px', fontSize: 12, fontFamily: "'JetBrains Mono',monospace", outline: 'none',
         }}
       />
-      <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
+
+      <div style={{ fontSize: 11, color: '#888', fontFamily: 'Inter,sans-serif', marginTop: 2 }}>Format</div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+        <label style={rowStyle(pratCompat)}>
+          <input type="checkbox" checked={pratCompat} onChange={e => setPraat(e.target.checked)}
+            style={{ marginTop: 2, accentColor: '#3a7bd5', flexShrink: 0 }} />
+          <div>
+            <div style={{ fontSize: 12, color: '#e8e6e1', fontFamily: 'Inter,sans-serif', fontWeight: 500 }}>
+              Praat compatible
+            </div>
+            <div style={{ fontSize: 10, color: '#6b6a65', fontFamily: 'Inter,sans-serif', marginTop: 1 }}>
+              WRD + PHN only · saved as <em>{(name.trim() || defaultName).replace(/\.TextGrid$/i, '')}_praat.TextGrid</em>
+            </div>
+          </div>
+        </label>
+        <label style={rowStyle(fullExport)}>
+          <input type="checkbox" checked={fullExport} onChange={e => setFull(e.target.checked)}
+            style={{ marginTop: 2, accentColor: '#3a7bd5', flexShrink: 0 }} />
+          <div>
+            <div style={{ fontSize: 12, color: '#e8e6e1', fontFamily: 'Inter,sans-serif', fontWeight: 500 }}>
+              Full export
+            </div>
+            <div style={{ fontSize: 10, color: '#6b6a65', fontFamily: 'Inter,sans-serif', marginTop: 1 }}>
+              WRD + PHN{customTiers.length > 0 ? ` + ${customTiers.map(t => t.name).join(', ')}` : ''} · saved as <em>{(name.trim() || defaultName).replace(/\.TextGrid$/i, '')}.TextGrid</em>
+            </div>
+          </div>
+        </label>
+      </div>
+
+      <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end', marginTop: 2 }}>
         <button className="btn" onClick={onClose}
           style={{ padding: '4px 10px', fontSize: 12, background: 'transparent' }}>Cancel</button>
-        <button className="btn" onClick={doExport}
-          style={{ padding: '4px 10px', fontSize: 12 }}>↓ Download</button>
+        <button className="btn" onClick={doExport} disabled={neitherSelected}
+          style={{ padding: '4px 10px', fontSize: 12, opacity: neitherSelected ? 0.4 : 1 }}>↓ Download</button>
       </div>
     </div>
   );
@@ -1042,10 +1083,6 @@ export default function App() {
       baseSpecCacheRef.current = { canvas: null };
       calcBaseSpec(buffer);
     }, 50);
-    setTimeout(() => {
-      formantTrackRef.current = buildFormantTrack(buffer);
-      redraw();
-    }, 50);
   }, [redraw, stopAudio]);
 
   const loadTextGrid = useCallback((text) => {
@@ -1075,8 +1112,9 @@ export default function App() {
   }, [redraw]);
 
   // ── Export TextGrid ───────────────────────────────────────────────────
-  const doExportTextGrid = useCallback((filename) => {
-    const text = serializeTextGrid(durationRef.current, wordsRef.current, phonesRef.current, customTiersRef.current);
+  const doExportTextGrid = useCallback((filename, includeCustom) => {
+    const tiers = includeCustom ? customTiersRef.current : [];
+    const text = serializeTextGrid(durationRef.current, wordsRef.current, phonesRef.current, tiers);
     const blob = new Blob([text], { type: 'text/plain' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -1481,8 +1519,7 @@ export default function App() {
       if (e.detail === 2) {
         const x0 = tX(item.t0, rect.width) + rect.left;
         const x1 = tX(item.t1, rect.width) + rect.left;
-        const tierType = tierId === 'phones' ? 'phone' : (tierId === 'words' ? 'word' : 'custom');
-        setLabelEditor({ id: item.id, tierId, tierType, text: item.text, x: (x0 + x1) / 2, y: e.clientY, boxW: Math.max(80, x1 - x0) });
+        setLabelEditor({ id: item.id, tierId, tierType: getTierType(tierId), text: item.text, x: (x0 + x1) / 2, y: e.clientY, boxW: Math.max(80, x1 - x0) });
         return;
       }
 
@@ -1586,8 +1623,7 @@ export default function App() {
         const rect = canvas.getBoundingClientRect();
         const x0 = tX(item.t0, rect.width) + rect.left;
         const x1 = tX(item.t1, rect.width) + rect.left;
-        const tierType = tierId === 'phones' ? 'phone' : (tierId === 'words' ? 'word' : 'custom');
-        setLabelEditor({ id: item.id, tierId, tierType, text: item.text, x: (x0 + x1) / 2, y: e.clientY, boxW: Math.max(80, x1 - x0) });
+        setLabelEditor({ id: item.id, tierId, tierType: getTierType(tierId), text: item.text, x: (x0 + x1) / 2, y: e.clientY, boxW: Math.max(80, x1 - x0) });
       });
 
       menuItem('Merge with next', () => {
@@ -2200,6 +2236,7 @@ export default function App() {
           {showExportPopover && (
             <ExportPopover
               defaultName={tgFileNameRef.current}
+              customTiers={customTiers}
               onExport={doExportTextGrid}
               onClose={() => setShowExportPopover(false)}
             />
