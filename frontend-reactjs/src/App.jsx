@@ -105,7 +105,7 @@ function withIds(items) {
   return items.map(it => ({ ...it, id: it.id ?? nextId(), row: 0 }));
 }
 
-function serializeTextGrid(duration, wordItems, phoneItems, customTiers = []) {
+function serializeTextGrid(duration, wordItems, phoneItems, customTiers = [], praatCompat = false) {
   const tierData = [
     { name: 'words', items: wordItems },
     { name: 'phones', items: phoneItems },
@@ -147,7 +147,7 @@ function serializeTextGrid(duration, wordItems, phoneItems, customTiers = []) {
       lines.push(`            xmin = ${iv.t0.toFixed(6)}`);
       lines.push(`            xmax = ${iv.t1.toFixed(6)}`);
       lines.push(`            text = "${iv.text}"`);
-      if (iv.score != null) lines.push(`            score = ${iv.score}`);
+      if (iv.score != null && !praatCompat) lines.push(`            score = ${iv.score}`);
     });
   });
 
@@ -157,15 +157,11 @@ function serializeTextGrid(duration, wordItems, phoneItems, customTiers = []) {
 
 function ExportPopover({ defaultName, customTiers, onExport, onClose }) {
   const [name, setName] = useState(defaultName);
-  const [pratCompat, setPraat] = useState(false);
-  const [fullExport, setFull]  = useState(true);
-  const neitherSelected = !pratCompat && !fullExport;
+  const [mode, setMode] = useState('full'); // 'praat' | 'full'
   const doExport = () => {
-    if (neitherSelected) return;
-    const stem = name.trim() || defaultName;
-    const base = stem.replace(/\.TextGrid$/i, '');
-    if (pratCompat) onExport(`${base}_praat.TextGrid`, false);
-    if (fullExport)  onExport(`${base}.TextGrid`,       true);
+    const base = (name.trim() || defaultName).replace(/\.TextGrid$/i, '');
+    if (mode === 'praat') onExport(`${base}_praat.TextGrid`, false);
+    else                  onExport(`${base}.TextGrid`,       true);
   };
   const rowStyle = (active) => ({
     display: 'flex', alignItems: 'flex-start', gap: 8, padding: '7px 10px',
@@ -173,6 +169,7 @@ function ExportPopover({ defaultName, customTiers, onExport, onClose }) {
     background: active ? '#1a1a24' : 'transparent',
     border: `1px solid ${active ? '#2e2e3a' : 'transparent'}`,
   });
+  const base = (name.trim() || defaultName).replace(/\.TextGrid$/i, '');
   return (
     <div style={{
       position: 'absolute', top: '100%', right: 0, marginTop: 4,
@@ -195,27 +192,27 @@ function ExportPopover({ defaultName, customTiers, onExport, onClose }) {
 
       <div style={{ fontSize: 11, color: '#888', fontFamily: 'Inter,sans-serif', marginTop: 2 }}>Format</div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-        <label style={rowStyle(pratCompat)}>
-          <input type="checkbox" checked={pratCompat} onChange={e => setPraat(e.target.checked)}
+        <label style={rowStyle(mode === 'praat')}>
+          <input type="radio" name="export-mode" checked={mode === 'praat'} onChange={() => setMode('praat')}
             style={{ marginTop: 2, accentColor: '#3a7bd5', flexShrink: 0 }} />
           <div>
             <div style={{ fontSize: 12, color: '#e8e6e1', fontFamily: 'Inter,sans-serif', fontWeight: 500 }}>
               Praat compatible
             </div>
             <div style={{ fontSize: 10, color: '#6b6a65', fontFamily: 'Inter,sans-serif', marginTop: 1 }}>
-              WRD + PHN only · saved as <em>{(name.trim() || defaultName).replace(/\.TextGrid$/i, '')}_praat.TextGrid</em>
+              WRD + PHN only · <em>{base}_praat.TextGrid</em>
             </div>
           </div>
         </label>
-        <label style={rowStyle(fullExport)}>
-          <input type="checkbox" checked={fullExport} onChange={e => setFull(e.target.checked)}
+        <label style={rowStyle(mode === 'full')}>
+          <input type="radio" name="export-mode" checked={mode === 'full'} onChange={() => setMode('full')}
             style={{ marginTop: 2, accentColor: '#3a7bd5', flexShrink: 0 }} />
           <div>
             <div style={{ fontSize: 12, color: '#e8e6e1', fontFamily: 'Inter,sans-serif', fontWeight: 500 }}>
               Full export
             </div>
             <div style={{ fontSize: 10, color: '#6b6a65', fontFamily: 'Inter,sans-serif', marginTop: 1 }}>
-              WRD + PHN{customTiers.length > 0 ? ` + ${customTiers.map(t => t.name).join(', ')}` : ''} · saved as <em>{(name.trim() || defaultName).replace(/\.TextGrid$/i, '')}.TextGrid</em>
+              WRD + PHN{customTiers.length > 0 ? ` + ${customTiers.map(t => t.name).join(', ')}` : ''} · <em>{base}.TextGrid</em>
             </div>
           </div>
         </label>
@@ -224,8 +221,8 @@ function ExportPopover({ defaultName, customTiers, onExport, onClose }) {
       <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end', marginTop: 2 }}>
         <button className="btn" onClick={onClose}
           style={{ padding: '4px 10px', fontSize: 12, background: 'transparent' }}>Cancel</button>
-        <button className="btn" onClick={doExport} disabled={neitherSelected}
-          style={{ padding: '4px 10px', fontSize: 12, opacity: neitherSelected ? 0.4 : 1 }}>↓ Download</button>
+        <button className="btn" onClick={doExport}
+          style={{ padding: '4px 10px', fontSize: 12 }}>↓ Download</button>
       </div>
     </div>
   );
@@ -367,6 +364,7 @@ export default function App() {
   // ── React state (drives toolbar UI only) ──────────────────────────────
   const [words, setWords]               = useState([]);
   const [phones, setPhones]             = useState([]);
+  const [audioFileName, setAudioFileName] = useState('');
   const [duration, setDuration]         = useState(70);
   const [playing, setPlaying]           = useState(false);
   const [loopMode, setLoopMode]         = useState(false);
@@ -664,7 +662,7 @@ export default function App() {
       const ft = formantTrackRef.current;
       if (ft) {
         const rT0 = ft.regionT0 ?? 0;
-        const regionDur = (ft.frames * ft.hop) / ft.sr;
+        const regionDur = ((ft.frames - 1) * ft.hop + (ft.frameSize ?? 1024)) / ft.sr;
         const FMAX = Math.min(8000, ft.sr / 2);
         const colors = ['rgba(255,80,80,0.85)', 'rgba(80,220,80,0.85)', 'rgba(80,140,255,0.85)'];
         for (const [fi, fdata] of [[0, ft.f1], [1, ft.f2], [2, ft.f3]]) {
@@ -1113,8 +1111,9 @@ export default function App() {
 
   // ── Export TextGrid ───────────────────────────────────────────────────
   const doExportTextGrid = useCallback((filename, includeCustom) => {
+    const praatCompat = !includeCustom;
     const tiers = includeCustom ? customTiersRef.current : [];
-    const text = serializeTextGrid(durationRef.current, wordsRef.current, phonesRef.current, tiers);
+    const text = serializeTextGrid(durationRef.current, wordsRef.current, phonesRef.current, tiers, praatCompat);
     const blob = new Blob([text], { type: 'text/plain' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -1175,6 +1174,7 @@ export default function App() {
         const res = await fetch(`/${encodeURIComponent(wavs[0])}`);
         if (!res.ok) throw new Error(res.statusText);
         await loadAudio(new File([await res.blob()], wavs[0], { type: 'audio/wav' }));
+        setAudioFileName(wavs[0].replace(/\.[^.]+$/, ''));
         setSetupError(null);
       } catch(e) { console.warn('Audio auto-load failed:', e); }
     })();
@@ -1684,6 +1684,7 @@ export default function App() {
         reader.onload = (ev) => loadTextGrid(ev.target.result);
         reader.readAsText(f);
       } else {
+        setAudioFileName(f.name.replace(/\.[^.]+$/, ''));
         loadAudio(f);
       }
     };
@@ -2062,7 +2063,7 @@ export default function App() {
       })()}
 
       <div className="toolbar">
-        <div className="logo">Annotation Viewer <span>Bluey · 280–350s</span></div>
+        <div className="logo">Gwilliams-Praat Aligner{audioFileName && <span>{audioFileName}</span>}</div>
         <div className="spacer" />
         <div className="transport">
           <button className={`btn${loopMode ? ' active' : ''}`} onClick={() => { const n = !loopModeRef.current; loopModeRef.current = n; setLoopMode(n); }} title="Loop selection (L)">
@@ -2077,7 +2078,7 @@ export default function App() {
                 const sel = selectionRef.current;
                 startPlay(sel ? sel.t0 : playheadRef.current);
               } else {
-                alert('Drop an audio file onto the page, or click Load audio.');
+                alert('Place a .wav file in public/ and reload the page.');
               }
             }}
           >{playing ? '⏸ Pause' : '▶ Play'}</button>
@@ -2263,10 +2264,6 @@ export default function App() {
             />
           )}
         </div>
-        <label className="load-btn">
-          🎵 Load audio
-          <input type="file" accept=".wav,.mp3,.flac,.m4a,.ogg" onChange={handleAudioFile} />
-        </label>
         <label className="load-btn">
           📄 Load TextGrid
           <input type="file" accept=".TextGrid,.textgrid" onChange={handleTGFile} />

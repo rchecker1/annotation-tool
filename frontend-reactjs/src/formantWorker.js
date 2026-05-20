@@ -76,7 +76,7 @@ self.onmessage = ({ data }) => {
   }
 
   self.postMessage(
-    { f1, f2, f3, frames, hop: HOP, sr, regionT0, id },
+    { f1, f2, f3, frames, hop: HOP, frameSize: FRAME, sr, regionT0, id },
     [f1.buffer, f2.buffer, f3.buffer]
   );
 };

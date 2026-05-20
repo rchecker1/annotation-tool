@@ -38,12 +38,18 @@ Then open **http://localhost:5173** in your browser.
 
 ## Loading your own files
 
-The app auto-loads the bundled Bluey audio and TextGrid on startup.  
-To use your own files, either:
+**Audio** must be placed in the `public/` folder before starting the dev server — the app auto-loads it on startup. Exactly one `.wav` file is expected:
 
-- **Drag and drop** a `.wav` / `.mp3` / `.flac` file onto the page to load audio
-- **Drag and drop** a `.TextGrid` file onto the page to load annotations
-- Use the **Load audio** and **Load TextGrid** buttons in the toolbar
+```
+code/frontend-reactjs/public/your_audio.wav
+```
+
+Then reload the page (`Ctrl+R` / `Cmd+R`) and the new file will load automatically.
+
+**TextGrid** annotations can be loaded two ways:
+- Place a `.TextGrid` file in `public/` alongside the audio — it auto-loads on startup
+- Use the **📄 Load TextGrid** button in the toolbar to load one at any time
+- **Drag and drop** a `.TextGrid` file onto the page
 
 ## Key features
 
