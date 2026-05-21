@@ -93,7 +93,7 @@ self.onmessage = async ({ data }) => {
       throw new Error(`Server error ${resp.status}: ${json.error || 'unknown'}${detail}`);
     }
 
-    self.postMessage({ ok: true, phones: json.phones, words: json.words, t0: json.t0, t1: json.t1 });
+    self.postMessage({ ok: true, phones: json.phones, words: json.words, t0: json.t0, t1: json.t1, warning: json.warning || null });
 
   } catch (err) {
     self.postMessage({ ok: false, error: err.message || String(err) });

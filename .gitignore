@@ -4,6 +4,8 @@ frontend-reactjs/node_modules/
 # Vite build output
 frontend-reactjs/dist/
 frontend-reactjs/.vite/
+frontend-reactjs/public/*.wav
+frontend-reactjs/public/*.TextGrid
 
 # Local env files
 .env

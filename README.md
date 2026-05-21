@@ -1,169 +1,188 @@
-# Annotation Tool — Quickstart
+# Annotation Tool
 
 A browser-based audio annotation viewer and editor for Praat TextGrid files.
 
-## Requirements
+The full workflow is:
+1. **ASR + forced alignment** (`asr/`) — transcribe audio and generate an initial TextGrid
+2. **Annotation tool** (`frontend-reactjs/`) — review, correct, and export the annotations
 
-- **Node.js** v18 or later (npm comes bundled with it)
+---
 
-  The easiest way to install is via **nvm**:
+## Prerequisites
+
+- **conda** — [Miniconda](https://docs.conda.io/en/latest/miniconda.html) or Anaconda
+- **Node.js v18+** — easiest via [nvm](https://github.com/nvm-sh/nvm):
   ```bash
-  # Mac / Linux
   curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
-  # restart your terminal, then:
-  nvm install 20
-  nvm use 20
+  # restart terminal, then:
+  nvm install 20 && nvm use 20
   ```
-  **Windows:** use [nvm-windows](https://github.com/coreybutler/nvm-windows/releases) instead.  
-  Or download the LTS installer directly from https://nodejs.org.
 
-  Verify: `node --version` should print `v20.x.x` or higher.
+---
 
-No other installs needed. Everything else is pulled in automatically.
+## One-time setup
 
-## Setup
+From the `code/` directory, run:
 
 ```bash
-# 1. Enter the project folder
+bash setup.sh
+```
+
+This creates three conda environments (`aligner`, `whisperx`, `nemo`), downloads the MFA English models, and installs the frontend Node dependencies. Takes ~10–20 min on first run depending on internet speed.
+
+---
+
+## Step 1 — Run ASR to generate a TextGrid
+
+Run from the `code/asr/` directory. Pick whichever model you have set up:
+
+```bash
+# WhisperX (large-v3-turbo)
+conda run -n whisperx python transcribe.py \
+    --model whisper_asr \
+    --audio  /path/to/your_audio.wav \
+    --output /path/to/output.TextGrid
+
+# NVIDIA Parakeet TDT 0.6B v3
+conda run -n nemo python transcribe.py \
+    --model parakeet \
+    --audio  /path/to/your_audio.wav \
+    --output /path/to/output.TextGrid
+```
+
+Output is a TextGrid with two tiers:
+- **Words** — one interval per word with a confidence score
+- **Phonemes** — one interval per phone from MFA forced alignment
+
+### Useful flags
+
+| Flag | Default | Description |
+|---|---|---|
+| `--no-mfa` | off | Skip MFA; Phonemes tier will be empty |
+| `--json` | off | Also save the raw ASR result as `<output>.json` |
+| `--dictionary` | `english_mfa` | MFA dictionary name or path |
+| `--acoustic-model` | `english_mfa` | MFA acoustic model name or path |
+| `--checkpoint` | model default | Override model checkpoint (Whisper only) |
+
+Both models handle arbitrary-length audio natively — no chunking needed.
+
+---
+
+## Step 2 — Load files into the annotation tool
+
+Copy your audio and the generated TextGrid into the frontend's `public/` folder:
+
+```
+frontend-reactjs/public/your_audio.wav
+frontend-reactjs/public/output.TextGrid
+```
+
+Then start the dev server:
+
+```bash
 cd frontend-reactjs
-
-# 2. Install dependencies (only needed once)
-npm install
-
-# 3. Start the dev server
 npm run dev
 ```
 
-Then open **http://localhost:5173** in your browser.
+Open **http://localhost:5173** — the audio and TextGrid load automatically.
 
-## Loading your own files
+You can also load a TextGrid at any time without restarting:
+- Click **📄 Load TextGrid** in the toolbar
+- Or **drag and drop** a `.TextGrid` file onto the page
 
-**Audio** must be placed in the `public/` folder before starting the dev server — the app auto-loads it on startup. Exactly one `.wav` file is expected:
+---
 
-```
-code/frontend-reactjs/public/your_audio.wav
-```
+## Step 3 — Annotate
 
-Then reload the page (`Ctrl+R` / `Cmd+R`) and the new file will load automatically.
-
-**TextGrid** annotations can be loaded two ways:
-- Place a `.TextGrid` file in `public/` alongside the audio — it auto-loads on startup
-- Use the **📄 Load TextGrid** button in the toolbar to load one at any time
-- **Drag and drop** a `.TextGrid` file onto the page
-
-## Key features
+### Navigating
 
 | Action | How |
 |---|---|
 | Play / Pause | `Space` or ▶ button |
 | Loop selection | `L` |
-| Zoom | Scroll wheel, or `Ctrl + scroll` to zoom at cursor |
-| Pan | Horizontal scroll, or drag the minimap at the bottom |
+| Zoom | Scroll wheel, or `Ctrl+scroll` to zoom at cursor |
+| Pan | Horizontal scroll, or drag the minimap |
 | Fit all | `F` |
-| Toggle edit mode | `F1` (customisable — click the key badge next to Edit button) |
-| Undo | `Ctrl+Z` / `Cmd+Z` |
 
-## Edit mode
+### Editing
 
-Click **✎ Edit** (or press `F1` or change the shortcut key by clicking it and setting it to the key you want) to enable annotation editing:
+Press **`F1`** (or click **✎ Edit**) to enter edit mode:
 
-- **Drag a tile boundary** — hover near the left/right edge (yellow highlight), then drag
-- **Drag a tile body** — click and drag the centre of a tile to shift it in time
-- **Double-click empty space** — creates a new annotation tile
-- **Double-click a tile** — rename it inline
+- **Drag a boundary** — hover near a tile edge (yellow highlight), then drag
+- **Drag a tile body** — drag the centre of a tile to shift it in time
+- **Double-click empty space** — create a new annotation tile
+- **Double-click a tile** — rename it inline; phoneme tiles show an IPA keyboard
 - **Right-click a tile** — Rename / Merge with next / Delete
 - **Overlapping tiles** automatically stack into rows
+- **Undo** — `Ctrl+Z` / `Cmd+Z`
 
-Click **↓ Export** to download the edited annotations as a `.TextGrid` file (not Praat-format).
+### Exporting
 
-## MFA (Forced Alignment)
-
-The **⚙ Run MFA** button in the toolbar runs the [Montreal Forced Aligner](https://montreal-forced-aligner.readthedocs.io/) on a selected audio segment and merges the resulting phone boundaries into the phoneme tier. It requires a small Flask server (`mfa_server.py`) running locally alongside the frontend.
-
-### One-time setup
-
-**1. Create the conda environment**
-
-```bash
-cd code
-conda env create -f environment.yml
-```
-
-This creates an environment called `aligner` with MFA 3.3.9 and all dependencies pre-pinned.
-
-**2. Download the acoustic model and dictionary**
-
-```bash
-conda activate aligner
-mfa model download acoustic english_us_arpa
-mfa model download dictionary english_us_arpa
-```
-
-Both downloads go to `~/Documents/MFA/pretrained_models/`. This is a one-time step — they persist across sessions.
-
-### Starting the server
-
-Every time you want to use forced alignment, start the server in a separate terminal before opening the app:
-
-```bash
-conda activate aligner
-python code/mfa_server.py
-```
-
-You should see:
-
-```
-09:00:00  INFO     MFA server starting on http://localhost:5050
-09:00:00  INFO       Acoustic model : english_us_arpa
-09:00:00  INFO       Dictionary     : english_us_arpa
-```
-
-The server stays running until you close the terminal or press `Ctrl+C`. The frontend auto-detects it — no configuration needed.
-
-### Using forced alignment
-
-1. In the annotation tool, enter **Edit mode** (`F1`) and select a time region on the waveform that covers one or more words in the **WRD tier**.
-2. Click **⚙ Run MFA** in the toolbar. If multiple words overlap the selection you'll be asked to confirm which ones to align.
-3. The job is queued (max 4 at a time). A status badge on the button shows queue depth. When the job completes, the phone boundaries are merged into the **PHN tier**, replacing any phones that were previously in that region.
-
-**Errors** appear as a pill in the bottom-right corner. Common causes:
-
-| Error | Fix |
-|---|---|
-| Server not reachable | Start `mfa_server.py` and confirm it prints the startup message |
-| Word not in dictionary | The word is out-of-vocabulary for `english_us_arpa` — edit the WRD label to a known spelling |
-| Audio too short | The selected region is under ~50 ms |
-| MFA alignment failed | Check the terminal running `mfa_server.py` for the full MFA stderr output |
-
-### Using a different language or model
-
-Set environment variables before starting the server:
-
-```bash
-MFA_ACOUSTIC_MODEL=french_mfa MFA_DICTIONARY=french_mfa python code/mfa_server.py
-```
-
-Run `mfa model download acoustic` and `mfa model download dictionary` with the same model name first.
+Click **↓ Export** to download the annotations. Two format options:
+- **Full** — includes all tiers and confidence scores (for re-loading into this tool)
+- **Praat-compatible** — standard TextGrid format, loadable in Praat
 
 ---
 
-## Building for production
+## In-browser MFA re-alignment
+
+The **⚙ Run MFA** button lets you re-run forced alignment on any selected region without leaving the browser. It requires a small Flask server running alongside the frontend.
+
+Start the server in a separate terminal before using this feature:
 
 ```bash
-npm run build
+conda activate aligner
+python mfa_server.py
 ```
 
-Output goes to `frontend-reactjs/dist/`. Serve that folder with any static file server.
+You should see:
+```
+09:00:00  INFO     MFA server starting on http://localhost:5050
+09:00:00  INFO       Acoustic model : english_mfa
+09:00:00  INFO       Dictionary     : english_mfa
+```
 
-## Zipping to share
+**To use it:**
+1. Enter Edit mode (`F1`) and select a time region covering one or more words in the Words tier
+2. Click **⚙ Run MFA** — you'll be asked to confirm which words to align if multiple overlap
+3. When the job completes, phone boundaries are merged into the Phonemes tier
 
-Exclude `node_modules` and `dist` before zipping — they are large and regenerated by `npm install` / `npm run build`:
+**Common errors:**
 
+| Error | Fix |
+|---|---|
+| Server not reachable | Start `mfa_server.py` and confirm the startup message appears |
+| Word not in dictionary | Word is out-of-vocabulary — edit the label to a known spelling |
+| Audio too short | Selected region is under ~50 ms |
+| MFA alignment failed | Check the terminal running `mfa_server.py` for details |
+
+To use a different language:
 ```bash
-# From the annotation_tool/code directory
-zip -r annotation_tool.zip code/frontend-reactjs \
-  --exclude "code/frontend-reactjs/node_modules/*" \
-  --exclude "code/frontend-reactjs/dist/*"
+MFA_ACOUSTIC_MODEL=french_mfa MFA_DICTIONARY=french_mfa python mfa_server.py
 ```
 
-The recipient just needs Node installed, then runs `npm install && npm run dev`.
+---
+
+## File structure
+
+```
+code/
+├── setup.sh                  — one-time setup for all environments
+├── environment.yml           — conda spec for the aligner env (MFA + Flask server)
+├── mfa_server.py             — Flask server for in-browser MFA re-alignment
+├── asr/                      — ASR + initial alignment pipeline
+│   ├── transcribe.py         — entry point: audio → TextGrid
+│   ├── aligner.py            — MFA forced alignment
+│   ├── textgrid_writer.py    — writes the output TextGrid
+│   ├── models/
+│   │   ├── whisper_asr.py    — WhisperX wrapper
+│   │   └── parakeet.py       — NVIDIA Parakeet wrapper
+│   ├── environment-whisperx.yml
+│   ├── environment-parakeet.yml
+│   ├── run_whisper.sh        — convenience script for WhisperX
+│   └── run_parakeet.sh       — convenience script for Parakeet
+└── frontend-reactjs/         — annotation tool (React + Vite)
+    ├── public/               — place your .wav and .TextGrid here
+    └── src/
+        └── App.jsx           — main application
+```

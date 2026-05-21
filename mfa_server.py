@@ -17,8 +17,8 @@ Endpoints:
 
 Requirements:
     pip install flask flask-cors soundfile numpy
-    mfa model download acoustic english_us_arpa
-    mfa model download dictionary english_us_arpa
+    mfa model download acoustic english_mfa
+    mfa model download dictionary english_mfa
 """
 
 import logging
@@ -30,6 +30,7 @@ import subprocess
 import tempfile
 import uuid
 from pathlib import Path
+from functools import lru_cache
 
 import numpy as np
 import soundfile as sf
@@ -50,11 +51,63 @@ CORS(app)
 # Suppress Flask's own request logger so our log is the only output
 logging.getLogger('werkzeug').setLevel(logging.WARNING)
 
-MFA_ACOUSTIC_MODEL = os.environ.get('MFA_ACOUSTIC_MODEL', 'english_us_arpa')
-MFA_DICTIONARY     = os.environ.get('MFA_DICTIONARY',     'english_us_arpa')
+MFA_ACOUSTIC_MODEL = os.environ.get('MFA_ACOUSTIC_MODEL', 'english_mfa')
+MFA_DICTIONARY     = os.environ.get('MFA_DICTIONARY',     'english_mfa')
 MFA_CMD            = os.environ.get('MFA_CMD', 'mfa').split()
 
 TARGET_SR = 16000
+
+# ── Dictionary helpers ────────────────────────────────────────────────────────
+
+@lru_cache(maxsize=1)
+def _load_dict_words() -> frozenset:
+    """Load all words from the active MFA dictionary into a frozenset."""
+    dict_path = (Path.home() / 'Documents' / 'MFA' / 'pretrained_models' /
+                 'dictionary' / f'{MFA_DICTIONARY}.dict')
+    if not dict_path.exists():
+        log.warning('Dictionary file not found at %s', dict_path)
+        return frozenset()
+    words = set()
+    with open(dict_path, encoding='utf-8') as f:
+        for line in f:
+            w = line.split()[0].lower() if line.strip() else None
+            if w:
+                words.add(w)
+    log.info('Loaded %d words from %s', len(words), dict_path.name)
+    return frozenset(words)
+
+
+def _edit_distance(a: str, b: str) -> int:
+    """Standard Levenshtein distance."""
+    if a == b:
+        return 0
+    if not a:
+        return len(b)
+    if not b:
+        return len(a)
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        curr = [i]
+        for j, cb in enumerate(b, 1):
+            curr.append(min(prev[j] + 1, curr[j - 1] + 1,
+                            prev[j - 1] + (0 if ca == cb else 1)))
+        prev = curr
+    return prev[-1]
+
+
+def _closest_dict_word(word: str) -> tuple[str, int] | None:
+    """Return (closest_word, distance) from the MFA dictionary, or None if dict is empty."""
+    vocab = _load_dict_words()
+    if not vocab:
+        return None
+    # Fast prefix filter: only compare words with similar length (±3 chars)
+    n = len(word)
+    candidates = [w for w in vocab if abs(len(w) - n) <= max(3, n // 2)]
+    if not candidates:
+        candidates = list(vocab)
+    best_word = min(candidates, key=lambda w: _edit_distance(word, w))
+    return best_word, _edit_distance(word, best_word)
+
 
 # ── Audio helpers ─────────────────────────────────────────────────────────────
 
@@ -197,13 +250,18 @@ def _validate_tiers(tiers: dict, seg_t0: float, seg_t1: float, words: list[str])
 
     words_tier = tiers.get('words', [])
     found = {it['text'].strip(string.punctuation).lower() for it in words_tier if it['text']}
-    for w in words:
-        w_norm = w.strip(string.punctuation).lower()
-        if w_norm and w_norm not in found:
-            raise ValueError(
-                f"Word '{w}' from transcript missing in MFA words output. "
-                f"Found: {sorted(found)}"
-            )
+    # 'unk' means the word is OOV in english_mfa — phones will all be 'spn',
+    # which is caught and rejected after this validation step.
+    if found == {'unk'}:
+        return
+    oov = [w for w in words
+           if w.strip(string.punctuation).lower() and
+           w.strip(string.punctuation).lower() not in found]
+    if oov:
+        raise ValueError(
+            f"Word(s) {oov} from transcript missing in MFA words output. "
+            f"Found: {sorted(found)}"
+        )
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -235,6 +293,26 @@ def align():
 
     log.info('  t_offset=%.3f s', t_offset)
     log.info('  transcript: %s  (raw: %s)', words, words_raw)
+
+    # Check each word against the dictionary; substitute OOV words with closest match
+    vocab = _load_dict_words()
+    oov_subs = {}  # original → substituted
+    if vocab:
+        subbed = []
+        for w in words:
+            if w in vocab:
+                subbed.append(w)
+            else:
+                match = _closest_dict_word(w)
+                if match:
+                    closest, dist = match
+                    oov_subs[w] = closest
+                    log.warning('  OOV: "%s" not in dictionary — substituting "%s" (distance %d)',
+                                w, closest, dist)
+                    subbed.append(closest)
+                else:
+                    subbed.append(w)
+        words = subbed
 
     corpus_name  = f'seg_{uuid.uuid4().hex[:12]}'
     mfa_cache_dir = Path.home() / 'Documents' / 'MFA' / corpus_name
@@ -330,12 +408,27 @@ def align():
         phones_tier = tiers_shifted.get(phones_key, [])
         words_tier  = tiers_shifted.get('words', [])
 
+        labeled_phones = [p['text'] for p in phones_tier if p['text']]
+        if labeled_phones and all(p == 'spn' for p in labeled_phones):
+            log.error('  all phones are spn — word(s) %s are OOV in english_mfa dictionary', words)
+            return jsonify({
+                'error': f"Word(s) {words} not found in the english_mfa dictionary — "
+                         "cannot align. Try editing the word label to a known spelling."
+            }), 422
+
         log.info('  → %d phones, %d words returned', len(phones_tier), len(words_tier))
-        log.info('  phones: %s', [p['text'] for p in phones_tier if p['text']])
+        log.info('  phones: %s', labeled_phones)
+        if oov_subs:
+            log.info('  oov substitutions: %s', oov_subs)
         log.info('SUCCESS')
 
-        return jsonify({'phones': phones_tier, 'words': words_tier,
-                        't0': seg_t0, 't1': seg_t1})
+        resp = {'phones': phones_tier, 'words': words_tier, 't0': seg_t0, 't1': seg_t1}
+        if oov_subs:
+            resp['warning'] = '; '.join(
+                f'"{orig}" not in dictionary — aligned as "{sub}"'
+                for orig, sub in oov_subs.items()
+            )
+        return jsonify(resp)
 
     except subprocess.TimeoutExpired:
         log.error('  MFA timed out after 180 s')

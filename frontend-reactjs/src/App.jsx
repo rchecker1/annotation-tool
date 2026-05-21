@@ -16,18 +16,39 @@ const getTierType = (tierId) =>
 // ── IPA virtual keyboard ──────────────────────────────────────────────────────
 
 // Loaded once from public/ipa_keys.json — edit that file to change the keys.
+// File is an object { symbol: "example with **bold**" } or legacy array.
 let _ipaKeys = null;
 async function loadIpaKeys() {
   if (_ipaKeys) return _ipaKeys;
   try {
     const res = await fetch('/ipa_keys.json');
-    _ipaKeys = res.ok ? await res.json() : [];
-  } catch (_) { _ipaKeys = []; }
+    if (!res.ok) { _ipaKeys = {}; return _ipaKeys; }
+    const data = await res.json();
+    _ipaKeys = Array.isArray(data)
+      ? Object.fromEntries(data.map(k => [k, null]))
+      : data;
+  } catch (_) { _ipaKeys = {}; }
   return _ipaKeys;
 }
 
+// Render "example with **bold**" as React spans
+function IpaExample({ text }) {
+  if (!text) return null;
+  const parts = [];
+  const re = /\*\*(.+?)\*\*/g;
+  let last = 0, m;
+  while ((m = re.exec(text)) !== null) {
+    if (m.index > last) parts.push(text.slice(last, m.index));
+    parts.push(<strong key={m.index} style={{ fontWeight: 700, color: '#e8e6e1' }}>{m[1]}</strong>);
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) parts.push(text.slice(last));
+  return <>{parts}</>;
+}
+
 function IpaKeyboard({ inputRef }) {
-  const [keys, setKeys] = useState(_ipaKeys || []);
+  const [keys, setKeys] = useState(_ipaKeys || {});
+  const [tooltip, setTooltip] = useState(null); // { symbol, example, x, y }
 
   useEffect(() => {
     if (!_ipaKeys) loadIpaKeys().then(setKeys);
@@ -47,7 +68,8 @@ function IpaKeyboard({ inputRef }) {
     el.setSelectionRange(pos, pos);
   };
 
-  if (!keys.length) return null;
+  const symbols = Object.keys(keys);
+  if (!symbols.length) return null;
 
   return (
     <div
@@ -56,22 +78,133 @@ function IpaKeyboard({ inputRef }) {
         marginTop: 4, padding: '5px 6px',
         background: '#13131a', border: '1px solid #2a2a30', borderRadius: 6,
         display: 'flex', flexWrap: 'wrap', gap: 3, maxWidth: 320,
+        position: 'relative',
       }}
     >
-      {keys.map(k => (
+      {symbols.map(sym => (
         <button
-          key={k}
+          key={sym}
           onMouseDown={e => e.preventDefault()}
-          onClick={() => insert(k)}
+          onClick={() => insert(sym)}
+          onMouseEnter={e => {
+            const rect = e.currentTarget.getBoundingClientRect();
+            setTooltip({ symbol: sym, example: keys[sym], rect });
+          }}
+          onMouseLeave={() => setTooltip(null)}
           style={{
             padding: '2px 6px', borderRadius: 4, border: '1px solid #2e2e3a',
             background: '#1e1e26', color: '#c8c6c1', fontSize: 12,
             fontFamily: "'JetBrains Mono',monospace", cursor: 'pointer', lineHeight: 1.4,
           }}
         >
-          {k}
+          {sym}
         </button>
       ))}
+      {tooltip && (
+        <IpaTooltip symbol={tooltip.symbol} example={tooltip.example} anchorRect={tooltip.rect} />
+      )}
+    </div>
+  );
+}
+
+function IpaTooltip({ symbol, example, anchorRect }) {
+  const ref = React.useRef(null);
+  // Start offscreen so the element can be measured before becoming visible
+  const [pos, setPos] = React.useState({ top: -9999, left: -9999, visible: false });
+
+  React.useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const tw = el.offsetWidth;
+    const th = el.offsetHeight;
+    const cx = anchorRect.left + anchorRect.width / 2;
+    let left = cx - tw / 2;
+    let top  = anchorRect.top - th - 8; // fixed positioning — no scrollY
+    left = Math.max(6, Math.min(left, window.innerWidth - tw - 6));
+    top  = Math.max(6, top);
+    setPos({ top, left, visible: true });
+  }, [anchorRect]);
+
+  return (
+    <div
+      ref={ref}
+      style={{
+        position: 'fixed',
+        top: pos.top, left: pos.left,
+        opacity: pos.visible ? 1 : 0,
+        background: '#1a1a24',
+        border: '1px solid #3a3a4a',
+        borderRadius: 7,
+        padding: '6px 10px',
+        pointerEvents: 'none',
+        zIndex: 9999,
+        minWidth: 80,
+        boxShadow: '0 4px 16px rgba(0,0,0,0.55)',
+        display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2,
+      }}
+    >
+      <span style={{
+        fontFamily: "'JetBrains Mono',monospace",
+        fontSize: 18, color: '#e8e6e1', lineHeight: 1.2,
+      }}>
+        /{symbol}/
+      </span>
+      {example && (
+        <span style={{ fontSize: 11, color: '#9a9896', whiteSpace: 'nowrap' }}>
+          as in "<IpaExample text={example} />"
+        </span>
+      )}
+    </div>
+  );
+}
+
+function LabelEditorPopover({ editor, onCommit, onClose }) {
+  const inputRef = React.useRef(null);
+  const wrapRef  = React.useRef(null);
+  const isPhone  = editor.tierType === 'phone';
+
+  // After mount, nudge upward if the popover overflows the viewport bottom
+  React.useLayoutEffect(() => {
+    const el = wrapRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    if (rect.bottom > window.innerHeight - 8) {
+      el.style.top = Math.max(8, window.innerHeight - rect.height - 8) + 'px';
+    }
+    if (rect.right > window.innerWidth - 8) {
+      el.style.left = Math.max(8, window.innerWidth - rect.width - 8) + 'px';
+    }
+  }, [isPhone]);
+
+  const left = editor.x - editor.boxW / 2;
+  const top  = editor.y - 18;
+
+  return (
+    <div ref={wrapRef} style={{ position: 'fixed', left, top, zIndex: 5000 }}>
+      <input
+        autoFocus
+        ref={inputRef}
+        defaultValue={editor.text}
+        style={{
+          width: editor.boxW,
+          background: '#1e1e26', color: '#e8e6e1',
+          border: '1.5px solid #3a7bd5', borderRadius: 4,
+          padding: '3px 6px', fontSize: 13, fontFamily: 'Inter,sans-serif',
+          outline: 'none', textAlign: 'center',
+        }}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') onCommit(e.target.value);
+          if (e.key === 'Escape') onClose();
+        }}
+        onBlur={(e) => {
+          // delay so IPA key clicks register before blur fires
+          setTimeout(() => {
+            if (document.activeElement !== inputRef.current)
+              onCommit(e.target.value);
+          }, 150);
+        }}
+      />
+      {isPhone && <IpaKeyboard inputRef={inputRef} />}
     </div>
   );
 }
@@ -383,6 +516,7 @@ export default function App() {
   const [playbackRate, setPlaybackRate]   = useState(1);
   const [mfaQueue, setMfaQueue]           = useState([]);      // {id,label,t0,t1,status,error}
   const [mfaError, setMfaError]           = useState(null);   // string | null
+  const [mfaWarning, setMfaWarning]       = useState(null);   // string | null
   const [mfaWordPicker, setMfaWordPicker] = useState(null);   // { words: WordItem[], sel } | null
   const [mfaQueueOpen, setMfaQueueOpen]   = useState(false);  // dropdown visible
   const [setupError, setSetupError]       = useState(null);   // string | null — shown before audio loads
@@ -732,7 +866,8 @@ export default function App() {
     const fillColor   = isWord ? 'rgba(58,123,213,0.18)'  : 'rgba(60,200,130,0.15)';
     const strokeColor = isWord ? 'rgba(58,123,213,0.45)'  : 'rgba(60,200,130,0.4)';
     const editFill    = isWord ? 'rgba(58,123,213,0.30)'  : 'rgba(60,200,130,0.28)';
-    const font        = isWord ? "500 12px Inter,sans-serif" : "11px 'JetBrains Mono',monospace";
+    const fontSize    = Math.round(Math.max(11, Math.min(24, rowH * 0.45)));
+    const font        = isWord ? `500 ${fontSize}px Inter,sans-serif` : `${Math.max(10, fontSize - 1)}px 'JetBrains Mono',monospace`;
     const hoverEdge   = hoverEdgeRef.current;
 
     for (const item of items) {
@@ -767,7 +902,7 @@ export default function App() {
         ctx.save();
         ctx.beginPath(); ctx.rect(x0 + 1, ry, bw - 2, rowH); ctx.clip();
         ctx.fillStyle = '#c8c6c1'; ctx.font = font; ctx.textAlign = 'center';
-        ctx.fillText(item.text, (x0 + x1) / 2, ry + rowH / 2 + 4);
+        ctx.fillText(item.text, (x0 + x1) / 2, ry + rowH / 2 + fontSize * 0.35);
         ctx.restore();
       }
     }
@@ -1460,6 +1595,7 @@ export default function App() {
     };
 
     const onMouseDown = (e) => {
+      if (e.button === 2) return;
       if (!editModeRef.current) {
         const rect = canvas.getBoundingClientRect();
         const startT = xT(e.clientX - rect.left, rect.width);
@@ -1901,6 +2037,8 @@ export default function App() {
 
       if (!result.ok) throw new Error(result.error);
 
+      if (result.warning) setMfaWarning(result.warning);
+
       pushUndo();
       const merged = applyMfaResult(result.phones, segT0, segT1);
       phonesRef.current = merged;
@@ -2028,39 +2166,13 @@ export default function App() {
       )}
 
       {/* Floating label editor input */}
-      {labelEditor && (() => {
-        const labelInputRef = { current: null };
-        const left = labelEditor.x - labelEditor.boxW / 2;
-        const top  = labelEditor.y - 18;
-        return (
-          <div style={{ position: 'fixed', left, top, zIndex: 5000 }}>
-            <input
-              autoFocus
-              ref={el => { labelInputRef.current = el; }}
-              defaultValue={labelEditor.text}
-              style={{
-                width: labelEditor.boxW,
-                background: '#1e1e26', color: '#e8e6e1',
-                border: '1.5px solid #3a7bd5', borderRadius: 4,
-                padding: '3px 6px', fontSize: 13, fontFamily: 'Inter,sans-serif',
-                outline: 'none', textAlign: 'center',
-              }}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') commitLabel(e.target.value);
-                if (e.key === 'Escape') setLabelEditor(null);
-              }}
-              onBlur={(e) => {
-                // delay so IPA key clicks register before blur fires
-                setTimeout(() => {
-                  if (document.activeElement !== labelInputRef.current)
-                    commitLabel(e.target.value);
-                }, 150);
-              }}
-            />
-            {labelEditor.tierType === 'phone' && <IpaKeyboard inputRef={labelInputRef} />}
-          </div>
-        );
-      })()}
+      {labelEditor && (
+        <LabelEditorPopover
+          editor={labelEditor}
+          onCommit={commitLabel}
+          onClose={() => setLabelEditor(null)}
+        />
+      )}
 
       <div className="toolbar">
         <div className="logo">Gwilliams-Praat Aligner{audioFileName && <span>{audioFileName}</span>}</div>
@@ -2510,6 +2622,28 @@ export default function App() {
           <button
             onClick={() => setMfaError(null)}
             style={{ background: 'none', border: 'none', color: '#f08080', cursor: 'pointer', fontSize: 14, padding: '0 0 0 4px', flexShrink: 0, lineHeight: 1, alignSelf: 'flex-start' }}
+            title="Dismiss"
+          >×</button>
+        </div>
+      )}
+
+      {/* ── MFA OOV warning toast ────────────────────────────────────────── */}
+      {mfaWarning && (
+        <div style={{
+          position: 'fixed', bottom: mfaError ? 72 : 16, right: 16, zIndex: 8000,
+          background: '#221a08', border: '1px solid #a07020', borderRadius: 7,
+          padding: '7px 10px 7px 12px', maxWidth: 380,
+          fontFamily: 'Inter,system-ui,sans-serif', fontSize: 11, color: '#f0b840',
+          display: 'flex', alignItems: 'flex-start', gap: 8,
+          boxShadow: '0 4px 16px rgba(0,0,0,0.5)',
+        }}>
+          <span style={{ flexShrink: 0 }}>⚠</span>
+          <span style={{ flex: 1, whiteSpace: 'pre-wrap', wordBreak: 'break-word', lineHeight: 1.5 }}>
+            {mfaWarning}
+          </span>
+          <button
+            onClick={() => setMfaWarning(null)}
+            style={{ background: 'none', border: 'none', color: '#f0b840', cursor: 'pointer', fontSize: 14, padding: '0 0 0 4px', flexShrink: 0, lineHeight: 1, alignSelf: 'flex-start' }}
             title="Dismiss"
           >×</button>
         </div>
