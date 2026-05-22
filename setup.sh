@@ -50,9 +50,9 @@ fi
 # ── 2. MFA models ─────────────────────────────────────────────────────────────
 
 echo ""
-echo "[3/4] Downloading MFA acoustic model and dictionary (english_mfa)"
-conda run -n aligner mfa model download acoustic english_mfa
-conda run -n aligner mfa model download dictionary english_mfa
+echo "[3/4] Downloading MFA acoustic model and dictionary (english_us_arpa)"
+conda run -n aligner mfa model download acoustic english_us_arpa
+conda run -n aligner mfa model download dictionary english_us_arpa
 echo "  → models saved to ~/Documents/MFA/pretrained_models/"
 
 # ── 3. Frontend dependencies ──────────────────────────────────────────────────

@@ -60,8 +60,8 @@ Output is a TextGrid with two tiers:
 |---|---|---|
 | `--no-mfa` | off | Skip MFA; Phonemes tier will be empty |
 | `--json` | off | Also save the raw ASR result as `<output>.json` |
-| `--dictionary` | `english_mfa` | MFA dictionary name or path |
-| `--acoustic-model` | `english_mfa` | MFA acoustic model name or path |
+| `--dictionary` | `english_us_arpa` | MFA dictionary name or path |
+| `--acoustic-model` | `english_us_arpa` | MFA acoustic model name or path |
 | `--checkpoint` | model default | Override model checkpoint (Whisper only) |
 
 Both models handle arbitrary-length audio natively — no chunking needed.
@@ -138,8 +138,8 @@ python mfa_server.py
 You should see:
 ```
 09:00:00  INFO     MFA server starting on http://localhost:5050
-09:00:00  INFO       Acoustic model : english_mfa
-09:00:00  INFO       Dictionary     : english_mfa
+09:00:00  INFO       Acoustic model : english_us_arpa
+09:00:00  INFO       Dictionary     : english_us_arpa
 ```
 
 **To use it:**

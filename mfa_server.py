@@ -17,8 +17,8 @@ Endpoints:
 
 Requirements:
     pip install flask flask-cors soundfile numpy
-    mfa model download acoustic english_mfa
-    mfa model download dictionary english_mfa
+    mfa model download acoustic english_us_arpa
+    mfa model download dictionary english_us_arpa
 """
 
 import logging
@@ -29,8 +29,8 @@ import string
 import subprocess
 import tempfile
 import uuid
-from pathlib import Path
 from functools import lru_cache
+from pathlib import Path
 
 import numpy as np
 import soundfile as sf
@@ -48,14 +48,39 @@ log = logging.getLogger('mfa_server')
 
 app = Flask(__name__)
 CORS(app)
-# Suppress Flask's own request logger so our log is the only output
 logging.getLogger('werkzeug').setLevel(logging.WARNING)
 
-MFA_ACOUSTIC_MODEL = os.environ.get('MFA_ACOUSTIC_MODEL', 'english_mfa')
-MFA_DICTIONARY     = os.environ.get('MFA_DICTIONARY',     'english_mfa')
+MFA_ACOUSTIC_MODEL = os.environ.get('MFA_ACOUSTIC_MODEL', 'english_us_arpa')
+MFA_DICTIONARY     = os.environ.get('MFA_DICTIONARY',     'english_us_arpa')
 MFA_CMD            = os.environ.get('MFA_CMD', 'mfa').split()
 
 TARGET_SR = 16000
+
+# ── ARPAbet → IPA conversion ──────────────────────────────────────────────────
+
+# Stress digits (0, 1, 2) are stripped before lookup.
+_ARPABET_TO_IPA: dict[str, str] = {
+    # Vowels
+    'AA': 'ɑ',  'AE': 'æ',  'AH': 'ʌ',  'AO': 'ɔ',
+    'AW': 'aʊ', 'AY': 'aɪ', 'EH': 'ɛ',  'ER': 'ɝ',
+    'EY': 'eɪ', 'IH': 'ɪ',  'IY': 'i',  'OW': 'oʊ',
+    'OY': 'ɔɪ', 'UH': 'ʊ',  'UW': 'u',
+    # Consonants
+    'B':  'b',  'CH': 'tʃ', 'D':  'd',  'DH': 'ð',
+    'F':  'f',  'G':  'g',  'HH': 'h',  'JH': 'dʒ',
+    'K':  'k',  'L':  'l',  'M':  'm',  'N':  'n',
+    'NG': 'ŋ',  'P':  'p',  'R':  'ɹ',  'S':  's',
+    'SH': 'ʃ',  'T':  't',  'TH': 'θ',  'V':  'v',
+    'W':  'w',  'Y':  'j',  'Z':  'z',  'ZH': 'ʒ',
+    # Silence / noise markers — pass through unchanged
+    'SPN': 'spn', 'SP': 'sp', 'SIL': 'sil',
+}
+
+def _arpa_to_ipa(phone: str) -> str:
+    """Convert a single ARPAbet phone (with optional stress digit) to IPA."""
+    key = phone.rstrip('012').upper()
+    return _ARPABET_TO_IPA.get(key, phone)
+
 
 # ── Dictionary helpers ────────────────────────────────────────────────────────
 
@@ -79,18 +104,15 @@ def _load_dict_words() -> frozenset:
 
 def _edit_distance(a: str, b: str) -> int:
     """Standard Levenshtein distance."""
-    if a == b:
-        return 0
-    if not a:
-        return len(b)
-    if not b:
-        return len(a)
+    if a == b: return 0
+    if not a:  return len(b)
+    if not b:  return len(a)
     prev = list(range(len(b) + 1))
     for i, ca in enumerate(a, 1):
         curr = [i]
         for j, cb in enumerate(b, 1):
-            curr.append(min(prev[j] + 1, curr[j - 1] + 1,
-                            prev[j - 1] + (0 if ca == cb else 1)))
+            curr.append(min(prev[j] + 1, curr[j-1] + 1,
+                            prev[j-1] + (0 if ca == cb else 1)))
         prev = curr
     return prev[-1]
 
@@ -100,13 +122,10 @@ def _closest_dict_word(word: str) -> tuple[str, int] | None:
     vocab = _load_dict_words()
     if not vocab:
         return None
-    # Fast prefix filter: only compare words with similar length (±3 chars)
     n = len(word)
-    candidates = [w for w in vocab if abs(len(w) - n) <= max(3, n // 2)]
-    if not candidates:
-        candidates = list(vocab)
-    best_word = min(candidates, key=lambda w: _edit_distance(word, w))
-    return best_word, _edit_distance(word, best_word)
+    candidates = [w for w in vocab if abs(len(w) - n) <= max(3, n // 2)] or list(vocab)
+    best = min(candidates, key=lambda w: _edit_distance(word, w))
+    return best, _edit_distance(word, best)
 
 
 # ── Audio helpers ─────────────────────────────────────────────────────────────
@@ -126,8 +145,7 @@ def _read_and_resample(path: Path) -> tuple[np.ndarray, float]:
             n_out = int(len(mono) * TARGET_SR / sr)
             mono = np.interp(
                 np.linspace(0, len(mono) - 1, n_out),
-                np.arange(len(mono)),
-                mono,
+                np.arange(len(mono)), mono,
             ).astype(np.float32)
 
     duration = len(mono) / TARGET_SR
@@ -200,14 +218,14 @@ def _parse_short_textgrid(lines: list[str]) -> dict[str, list]:
     tiers: dict[str, list] = {}
     it = iter(lines)
     try:
-        next_val(it); next_val(it)          # header lines
-        next_val(it); next_val(it)          # xmin, xmax
-        next_val(it)                        # <exists>
+        next_val(it); next_val(it)
+        next_val(it); next_val(it)
+        next_val(it)
         num_tiers = int(next_val(it))
         for _ in range(num_tiers):
-            next_val(it)                    # tier class
+            next_val(it)
             tier_name = unquote(next_val(it))
-            next_val(it); next_val(it)      # xmin, xmax
+            next_val(it); next_val(it)
             n = int(next_val(it))
             items = []
             for _ in range(n):
@@ -250,7 +268,7 @@ def _validate_tiers(tiers: dict, seg_t0: float, seg_t1: float, words: list[str])
 
     words_tier = tiers.get('words', [])
     found = {it['text'].strip(string.punctuation).lower() for it in words_tier if it['text']}
-    # 'unk' means the word is OOV in english_mfa — phones will all be 'spn',
+    # 'unk' means the word is OOV in the dictionary — phones will all be 'spn',
     # which is caught and rejected after this validation step.
     if found == {'unk'}:
         return
@@ -294,9 +312,9 @@ def align():
     log.info('  t_offset=%.3f s', t_offset)
     log.info('  transcript: %s  (raw: %s)', words, words_raw)
 
-    # Check each word against the dictionary; substitute OOV words with closest match
-    vocab = _load_dict_words()
-    oov_subs = {}  # original → substituted
+    # Substitute OOV words with closest dictionary match
+    vocab    = _load_dict_words()
+    oov_subs = {}
     if vocab:
         subbed = []
         for w in words:
@@ -307,16 +325,15 @@ def align():
                 if match:
                     closest, dist = match
                     oov_subs[w] = closest
-                    log.warning('  OOV: "%s" not in dictionary — substituting "%s" (distance %d)',
-                                w, closest, dist)
+                    log.warning('  OOV: "%s" → "%s" (edit distance %d)', w, closest, dist)
                     subbed.append(closest)
                 else:
                     subbed.append(w)
         words = subbed
 
-    corpus_name  = f'seg_{uuid.uuid4().hex[:12]}'
+    corpus_name   = f'seg_{uuid.uuid4().hex[:12]}'
     mfa_cache_dir = Path.home() / 'Documents' / 'MFA' / corpus_name
-    tmpdir = Path(tempfile.mkdtemp(prefix='mfa_align_'))
+    tmpdir        = Path(tempfile.mkdtemp(prefix='mfa_align_'))
 
     try:
         input_dir  = tmpdir / corpus_name
@@ -347,7 +364,7 @@ def align():
 
         # ── 3. Run MFA ────────────────────────────────────────────────────────
         cmd = MFA_CMD + [
-            'align', '--clean', '--overwrite',
+            'align', '--clean', '--overwrite', '--single_speaker',
             str(input_dir), MFA_DICTIONARY, MFA_ACOUSTIC_MODEL, str(output_dir),
         ]
         log.info('[3/4] Running MFA …')
@@ -355,7 +372,6 @@ def align():
 
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
 
-        # Always show MFA's stderr so issues are visible in the terminal
         for line in result.stderr.splitlines():
             line = line.strip()
             if line:
@@ -409,17 +425,23 @@ def align():
         words_tier  = tiers_shifted.get('words', [])
 
         labeled_phones = [p['text'] for p in phones_tier if p['text']]
-        if labeled_phones and all(p == 'spn' for p in labeled_phones):
-            log.error('  all phones are spn — word(s) %s are OOV in english_mfa dictionary', words)
+        if labeled_phones and all(p.lower() in ('spn', 'sp', 'sil') for p in labeled_phones):
+            log.error('  all phones are silence/noise — word(s) %s are OOV in dictionary', words)
             return jsonify({
-                'error': f"Word(s) {words} not found in the english_mfa dictionary — "
+                'error': f"Word(s) {words} not found in the {MFA_DICTIONARY} dictionary — "
                          "cannot align. Try editing the word label to a known spelling."
             }), 422
 
+        # Convert ARPAbet phones to IPA
+        phones_tier = [
+            {**p, 'text': _arpa_to_ipa(p['text']) if p['text'] else p['text']}
+            for p in phones_tier
+        ]
+        ipa_phones = [p['text'] for p in phones_tier if p['text']]
         log.info('  → %d phones, %d words returned', len(phones_tier), len(words_tier))
-        log.info('  phones: %s', labeled_phones)
+        log.info('  phones (IPA): %s', ipa_phones)
         if oov_subs:
-            log.info('  oov substitutions: %s', oov_subs)
+            log.info('  oov subs: %s', oov_subs)
         log.info('SUCCESS')
 
         resp = {'phones': phones_tier, 'words': words_tier, 't0': seg_t0, 't1': seg_t1}
