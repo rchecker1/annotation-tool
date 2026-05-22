@@ -28,29 +28,29 @@ else
   echo "  → done"
 fi
 
-echo ""
-echo "[2/4] Creating conda environments for ASR"
+# echo ""
+# echo "[2/4] Creating conda environments for ASR"
 
-if conda env list | grep -q "^whisperx "; then
-  echo "  → 'whisperx' already exists, skipping"
-else
-  echo "  Creating 'whisperx' env..."
-  conda env create -f "$SCRIPT_DIR/asr/environment-whisperx.yml"
-  echo "  → done"
-fi
+# if conda env list | grep -q "^whisperx "; then
+#   echo "  → 'whisperx' already exists, skipping"
+# else
+#   echo "  Creating 'whisperx' env..."
+#   conda env create -f "$SCRIPT_DIR/asr/environment-whisperx.yml"
+#   echo "  → done"
+# fi
 
-if conda env list | grep -q "^nemo "; then
-  echo "  → 'nemo' already exists, skipping"
-else
-  echo "  Creating 'nemo' env (Parakeet)..."
-  conda env create -f "$SCRIPT_DIR/asr/environment-parakeet.yml"
-  echo "  → done"
-fi
+# if conda env list | grep -q "^nemo "; then
+#   echo "  → 'nemo' already exists, skipping"
+# else
+#   echo "  Creating 'nemo' env (Parakeet)..."
+#   conda env create -f "$SCRIPT_DIR/asr/environment-parakeet.yml"
+#   echo "  → done"
+# fi
 
 # ── 2. MFA models ─────────────────────────────────────────────────────────────
 
 echo ""
-echo "[3/4] Downloading MFA acoustic model and dictionary (english_us_arpa)"
+echo "[2/4] Downloading MFA acoustic model and dictionary (english_us_arpa)"
 conda run -n aligner mfa model download acoustic english_us_arpa
 conda run -n aligner mfa model download dictionary english_us_arpa
 echo "  → models saved to ~/Documents/MFA/pretrained_models/"

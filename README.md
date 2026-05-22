@@ -31,8 +31,8 @@ bash setup.sh
 This creates three conda environments (`aligner`, `whisperx`, `nemo`), downloads the MFA English models, and installs the frontend Node dependencies. Takes ~10–20 min on first run depending on internet speed.
 
 ---
-
-## Step 1 — Run ASR to generate a TextGrid
+<!-- 
+## Step 1 — Run ASR to generate a TextGrid 
 
 Run from the `code/asr/` directory. Pick whichever model you have set up:
 
@@ -66,15 +66,15 @@ Output is a TextGrid with two tiers:
 
 Both models handle arbitrary-length audio natively — no chunking needed.
 
----
+--- -->
 
 ## Step 2 — Load files into the annotation tool
 
-Copy your audio and the generated TextGrid into the frontend's `public/` folder:
+Copy your audio and the generated TextGrid into the frontend's `public/` folder. For this iteration, please use the .wav and .textgrid files we provided:
 
 ```
-frontend-reactjs/public/your_audio.wav
-frontend-reactjs/public/output.TextGrid
+frontend-reactjs/public/audio.wav
+frontend-reactjs/public/output_whisper.TextGrid
 ```
 
 Then start the dev server:
@@ -128,7 +128,7 @@ Click **↓ Export** to download the annotations. Two format options:
 
 The **⚙ Run MFA** button lets you re-run forced alignment on any selected region without leaving the browser. It requires a small Flask server running alongside the frontend.
 
-Start the server in a separate terminal before using this feature:
+Start the server **in a separate terminal** before using this feature:
 
 ```bash
 conda activate aligner
