@@ -16,19 +16,15 @@ Endpoints:
     GET  /health  →  {"status": "ok"}
 
 Requirements:
-    pip install flask flask-cors soundfile numpy
     mfa model download acoustic english_us_arpa
     mfa model download dictionary english_us_arpa
 """
 
 import logging
 import os
-import re
-import shutil
 import string
-import subprocess
 import tempfile
-import uuid
+import time
 from functools import lru_cache
 from pathlib import Path
 
@@ -52,32 +48,26 @@ logging.getLogger('werkzeug').setLevel(logging.WARNING)
 
 MFA_ACOUSTIC_MODEL = os.environ.get('MFA_ACOUSTIC_MODEL', 'english_us_arpa')
 MFA_DICTIONARY     = os.environ.get('MFA_DICTIONARY',     'english_us_arpa')
-MFA_CMD            = os.environ.get('MFA_CMD', 'mfa').split()
 
 TARGET_SR = 16000
 
 # ── ARPAbet → IPA conversion ──────────────────────────────────────────────────
 
-# Stress digits (0, 1, 2) are stripped before lookup.
 _ARPABET_TO_IPA: dict[str, str] = {
-    # Vowels
     'AA': 'ɑ',  'AE': 'æ',  'AH': 'ʌ',  'AO': 'ɔ',
     'AW': 'aʊ', 'AY': 'aɪ', 'EH': 'ɛ',  'ER': 'ɝ',
     'EY': 'eɪ', 'IH': 'ɪ',  'IY': 'i',  'OW': 'oʊ',
     'OY': 'ɔɪ', 'UH': 'ʊ',  'UW': 'u',
-    # Consonants
     'B':  'b',  'CH': 'tʃ', 'D':  'd',  'DH': 'ð',
     'F':  'f',  'G':  'g',  'HH': 'h',  'JH': 'dʒ',
     'K':  'k',  'L':  'l',  'M':  'm',  'N':  'n',
     'NG': 'ŋ',  'P':  'p',  'R':  'ɹ',  'S':  's',
     'SH': 'ʃ',  'T':  't',  'TH': 'θ',  'V':  'v',
     'W':  'w',  'Y':  'j',  'Z':  'z',  'ZH': 'ʒ',
-    # Silence / noise markers — pass through unchanged
     'SPN': 'spn', 'SP': 'sp', 'SIL': 'sil',
 }
 
 def _arpa_to_ipa(phone: str) -> str:
-    """Convert a single ARPAbet phone (with optional stress digit) to IPA."""
     key = phone.rstrip('012').upper()
     return _ARPABET_TO_IPA.get(key, phone)
 
@@ -86,7 +76,6 @@ def _arpa_to_ipa(phone: str) -> str:
 
 @lru_cache(maxsize=1)
 def _load_dict_words() -> frozenset:
-    """Load all words from the active MFA dictionary into a frozenset."""
     dict_path = (Path.home() / 'Documents' / 'MFA' / 'pretrained_models' /
                  'dictionary' / f'{MFA_DICTIONARY}.dict')
     if not dict_path.exists():
@@ -103,7 +92,6 @@ def _load_dict_words() -> frozenset:
 
 
 def _edit_distance(a: str, b: str) -> int:
-    """Standard Levenshtein distance."""
     if a == b: return 0
     if not a:  return len(b)
     if not b:  return len(a)
@@ -118,7 +106,6 @@ def _edit_distance(a: str, b: str) -> int:
 
 
 def _closest_dict_word(word: str) -> tuple[str, int] | None:
-    """Return (closest_word, distance) from the MFA dictionary, or None if dict is empty."""
     vocab = _load_dict_words()
     if not vocab:
         return None
@@ -128,10 +115,58 @@ def _closest_dict_word(word: str) -> tuple[str, int] | None:
     return best, _edit_distance(word, best)
 
 
+# ── Persistent aligner (loaded once at startup) ───────────────────────────────
+
+_kalpy_aligner = None
+
+def _init_aligner():
+    global _kalpy_aligner
+
+    from montreal_forced_aligner.models import AcousticModel
+    from montreal_forced_aligner.alignment.multiprocessing import KalpyAligner
+    from kalpy.fstext.lexicon import LexiconCompiler
+
+    acoustic_path = (Path.home() / 'Documents' / 'MFA' / 'pretrained_models' /
+                     'acoustic' / f'{MFA_ACOUSTIC_MODEL}.zip')
+    dict_path     = (Path.home() / 'Documents' / 'MFA' / 'pretrained_models' /
+                     'dictionary' / f'{MFA_DICTIONARY}.dict')
+
+    if not acoustic_path.exists():
+        raise FileNotFoundError(
+            f'Acoustic model not found: {acoustic_path}\n'
+            f'Run: mfa model download acoustic {MFA_ACOUSTIC_MODEL}')
+    if not dict_path.exists():
+        raise FileNotFoundError(
+            f'Dictionary not found: {dict_path}\n'
+            f'Run: mfa model download dictionary {MFA_DICTIONARY}')
+
+    log.info('Loading models (one-time, ~15 s) …')
+    t0 = time.time()
+
+    model = AcousticModel(str(acoustic_path))
+    p = model.parameters
+
+    lc = LexiconCompiler(
+        silence_probability=p['silence_probability'],
+        initial_silence_probability=p['initial_silence_probability'],
+        final_silence_correction=p['final_silence_correction'],
+        final_non_silence_correction=p['final_non_silence_correction'],
+        silence_phone=p['optional_silence_phone'],
+        oov_phone=p['oov_phone'],
+        position_dependent_phones=p['position_dependent_phones'],
+        phones=p['non_silence_phones'],
+    )
+    lc.load_pronunciations(dict_path)
+    lc.create_fsts()
+
+    _kalpy_aligner = KalpyAligner(model, lc)
+
+    log.info('  Models ready in %.1f s', time.time() - t0)
+
+
 # ── Audio helpers ─────────────────────────────────────────────────────────────
 
 def _read_and_resample(path: Path) -> tuple[np.ndarray, float]:
-    """Read any WAV, mix to mono, resample to TARGET_SR. Returns (samples, duration_s)."""
     data, sr = sf.read(str(path), dtype='float32', always_2d=True)
     mono = data.mean(axis=1)
     log.info('  audio loaded: sr=%d Hz, channels=%d, %.3f s', sr, data.shape[1], len(mono)/sr)
@@ -159,134 +194,11 @@ def _write_wav(path: Path, samples: np.ndarray):
     log.info('  wrote WAV: %s (%.1f KB)', path.name, path.stat().st_size / 1024)
 
 
-# ── TextGrid parsers ──────────────────────────────────────────────────────────
-
-def _parse_textgrid(text: str) -> dict[str, list]:
-    lines = [l.rstrip() for l in text.splitlines()]
-    is_short = bool(lines) and 'short' in lines[0].lower()
-    log.info('  parsing MFA TextGrid (format=%s)', 'short' if is_short else 'long')
-    return _parse_short_textgrid(lines) if is_short else _parse_long_textgrid(lines)
-
-
-def _parse_long_textgrid(lines: list[str]) -> dict[str, list]:
-    tiers: dict[str, list] = {}
-    i = 0
-    while i < len(lines):
-        if re.match(r'^\s*item\s*\[\d+\]\s*:', lines[i]):
-            i += 1
-            tier_name = None
-            items: list = []
-            while i < len(lines) and not re.match(r'^\s*item\s*\[\d+\]\s*:', lines[i]):
-                nm = re.match(r'^\s*name\s*=\s*"(.*)"', lines[i])
-                if nm:
-                    tier_name = nm.group(1)
-                im = re.match(r'^\s*intervals\s*\[\d+\]\s*:', lines[i])
-                if im:
-                    i += 1
-                    t0 = t1 = 0.0
-                    text_val = ''
-                    while i < len(lines) and not re.match(
-                            r'^\s*(intervals|item|points)\s*\[', lines[i]):
-                        m = re.match(r'^\s*xmin\s*=\s*([\d.eE+\-]+)', lines[i])
-                        if m: t0 = float(m.group(1))
-                        m = re.match(r'^\s*xmax\s*=\s*([\d.eE+\-]+)', lines[i])
-                        if m: t1 = float(m.group(1))
-                        m = re.match(r'^\s*text\s*=\s*"(.*)"', lines[i])
-                        if m: text_val = m.group(1)
-                        i += 1
-                    items.append({'t0': t0, 't1': t1, 'text': text_val.strip()})
-                    continue
-                i += 1
-            if tier_name:
-                tiers[tier_name.lower()] = items
-            continue
-        i += 1
-    return tiers
-
-
-def _parse_short_textgrid(lines: list[str]) -> dict[str, list]:
-    def unquote(s: str) -> str:
-        s = s.strip()
-        return s[1:-1] if s.startswith('"') and s.endswith('"') else s
-
-    def next_val(it):
-        while True:
-            line = next(it).strip()
-            if line:
-                return line
-
-    tiers: dict[str, list] = {}
-    it = iter(lines)
-    try:
-        next_val(it); next_val(it)
-        next_val(it); next_val(it)
-        next_val(it)
-        num_tiers = int(next_val(it))
-        for _ in range(num_tiers):
-            next_val(it)
-            tier_name = unquote(next_val(it))
-            next_val(it); next_val(it)
-            n = int(next_val(it))
-            items = []
-            for _ in range(n):
-                t0   = float(next_val(it))
-                t1   = float(next_val(it))
-                text = unquote(next_val(it)).strip()
-                items.append({'t0': t0, 't1': t1, 'text': text})
-            tiers[tier_name.lower()] = items
-    except StopIteration:
-        pass
-    return tiers
-
-
-# ── Validation ────────────────────────────────────────────────────────────────
-
-def _validate_tiers(tiers: dict, seg_t0: float, seg_t1: float, words: list[str]):
-    tol = 0.05
-    for tier_name, items in tiers.items():
-        for it in items:
-            t0, t1, text = it['t0'], it['t1'], it['text']
-            if t1 - t0 < -1e-6:
-                raise ValueError(
-                    f"Negative-duration interval [{t0:.4f}, {t1:.4f}] in '{tier_name}'"
-                )
-            if text and (t1 - t0) < 1e-4:
-                raise ValueError(
-                    f"Near-zero interval ({(t1-t0)*1000:.2f} ms) '{text}' in '{tier_name}'"
-                )
-            if t0 < seg_t0 - tol or t1 > seg_t1 + tol:
-                raise ValueError(
-                    f"Interval [{t0:.4f}, {t1:.4f}] '{text}' in '{tier_name}' "
-                    f"outside segment [{seg_t0:.4f}, {seg_t1:.4f}]"
-                )
-
-    if not any('phone' in k for k in tiers):
-        raise ValueError(
-            "MFA output has no phones tier — alignment failed. "
-            "Check acoustic model and dictionary are installed."
-        )
-
-    words_tier = tiers.get('words', [])
-    found = {it['text'].strip(string.punctuation).lower() for it in words_tier if it['text']}
-    # 'unk' means the word is OOV in the dictionary — phones will all be 'spn',
-    # which is caught and rejected after this validation step.
-    if found == {'unk'}:
-        return
-    oov = [w for w in words
-           if w.strip(string.punctuation).lower() and
-           w.strip(string.punctuation).lower() not in found]
-    if oov:
-        raise ValueError(
-            f"Word(s) {oov} from transcript missing in MFA words output. "
-            f"Found: {sorted(found)}"
-        )
-
-
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @app.route('/health')
 def health():
-    return jsonify({'status': 'ok'})
+    return jsonify({'status': 'ok', 'model': MFA_ACOUSTIC_MODEL, 'dictionary': MFA_DICTIONARY})
 
 
 @app.route('/align', methods=['POST'])
@@ -295,7 +207,6 @@ def align():
     log.info('POST /align')
 
     if 'audio' not in request.files:
-        log.warning('  missing audio field')
         return jsonify({'error': 'Missing audio file'}), 400
 
     words_str = request.form.get('words', '').strip()
@@ -304,7 +215,6 @@ def align():
     if not words_str:
         return jsonify({'error': '"words" field is required'}), 400
 
-    # Strip punctuation/case so "Yep," → "yep" before passing to MFA
     words_raw = words_str.split()
     words = [w.strip(string.punctuation).lower() for w in words_raw]
     words = [w for w in words if w]
@@ -331,120 +241,75 @@ def align():
                     subbed.append(w)
         words = subbed
 
-    corpus_name   = f'seg_{uuid.uuid4().hex[:12]}'
-    mfa_cache_dir = Path.home() / 'Documents' / 'MFA' / corpus_name
-    tmpdir        = Path(tempfile.mkdtemp(prefix='mfa_align_'))
-
+    tmpdir = Path(tempfile.mkdtemp(prefix='mfa_align_'))
     try:
-        input_dir  = tmpdir / corpus_name
-        output_dir = tmpdir / 'output'
-        input_dir.mkdir()
-        output_dir.mkdir()
-
         # ── 1. Save + normalise audio ─────────────────────────────────────────
-        log.info('[1/4] Loading and resampling audio …')
+        log.info('[1/3] Loading and resampling audio …')
         raw_path = tmpdir / 'raw.wav'
         request.files['audio'].save(str(raw_path))
         log.info('  raw file: %.1f KB', raw_path.stat().st_size / 1024)
 
         samples, duration = _read_and_resample(raw_path)
-
         if duration < 0.05:
-            log.warning('  audio too short: %.1f ms', duration * 1000)
             return jsonify({'error': f'Audio too short ({duration*1000:.0f} ms)'}), 400
 
-        _write_wav(input_dir / 'segment.wav', samples)
+        wav_path = tmpdir / 'segment.wav'
+        _write_wav(wav_path, samples)
 
-        # ── 2. Write .lab transcript ──────────────────────────────────────────
-        log.info('[2/4] Writing transcript …')
+        # ── 2. Align ──────────────────────────────────────────────────────────
         transcript = ' '.join(words)
-        lab_path = input_dir / 'segment.lab'
-        lab_path.write_text(transcript, encoding='utf-8')
-        log.info('  .lab: "%s"', transcript)
+        log.info('[2/3] Aligning "%s" …', transcript)
+        t1 = time.time()
 
-        # ── 3. Run MFA ────────────────────────────────────────────────────────
-        cmd = MFA_CMD + [
-            'align', '--clean', '--overwrite', '--single_speaker',
-            str(input_dir), MFA_DICTIONARY, MFA_ACOUSTIC_MODEL, str(output_dir),
-        ]
-        log.info('[3/4] Running MFA …')
-        log.info('  cmd: %s', ' '.join(cmd))
+        from kalpy.utterance import Utterance, Segment
+        segment = Segment(str(wav_path), 0.0, duration, 0)
+        utt     = Utterance(segment, transcript, None, None)
+        ctm     = _kalpy_aligner.align_utterance(utt)
+        ctm.update_utterance_boundaries(t_offset, t_offset + duration)
 
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+        log.info('  alignment done in %.2f s', time.time() - t1)
 
-        for line in result.stderr.splitlines():
-            line = line.strip()
-            if line:
-                log.info('  mfa> %s', line)
+        # ── 3. Extract intervals + convert to IPA ─────────────────────────────
+        log.info('[3/3] Extracting intervals …')
+        phones_tier = []
+        words_tier  = []
 
-        if result.returncode != 0:
-            log.error('  MFA exited with code %d', result.returncode)
-            return jsonify({'error': 'MFA alignment failed',
-                            'detail': result.stderr[-3000:]}), 500
-
-        out_tg = output_dir / 'segment.TextGrid'
-        if not out_tg.exists():
-            log.error('  MFA succeeded but no output TextGrid found in %s', output_dir)
-            return jsonify({'error': 'MFA ran but produced no TextGrid',
-                            'detail': result.stdout[-1000:] + result.stderr[-1000:]}), 500
-
-        log.info('  output TextGrid: %.1f KB', out_tg.stat().st_size / 1024)
-
-        # ── 4. Parse, validate, shift ─────────────────────────────────────────
-        log.info('[4/4] Parsing and validating output …')
-        tg_text = out_tg.read_text(encoding='utf-8')
-        tiers = _parse_textgrid(tg_text)
-
-        if not tiers:
-            return jsonify({'error': 'Could not parse MFA TextGrid',
-                            'detail': tg_text[:500]}), 500
-
-        for tier_name, items in tiers.items():
-            labeled = [it for it in items if it['text']]
-            log.info('  tier %-10s  %d intervals (%d labeled)',
-                     f"'{tier_name}'", len(items), len(labeled))
-
-        seg_t0 = t_offset
-        seg_t1 = t_offset + duration
-        tiers_shifted = {
-            name: [{'t0': round(it['t0'] + t_offset, 6),
-                    't1': round(it['t1'] + t_offset, 6),
-                    'text': it['text']}
-                   for it in items]
-            for name, items in tiers.items()
-        }
-
-        try:
-            _validate_tiers(tiers_shifted, seg_t0, seg_t1, words)
-        except ValueError as exc:
-            log.error('  validation failed: %s', exc)
-            return jsonify({'error': 'Validation failed', 'detail': str(exc)}), 422
-
-        phones_key  = next((k for k in tiers_shifted if 'phone' in k), None)
-        phones_tier = tiers_shifted.get(phones_key, [])
-        words_tier  = tiers_shifted.get('words', [])
+        for wi in ctm.word_intervals:
+            if wi.label and wi.label not in ('', '<eps>'):
+                words_tier.append({
+                    't0': round(wi.begin, 6),
+                    't1': round(wi.end,   6),
+                    'text': wi.label,
+                })
+            for pi in wi.phones:
+                label = pi.label or ''
+                ipa = _arpa_to_ipa(label)
+                if label and label not in ('', '<eps>') and ipa not in ('spn', 'sp', 'sil'):
+                    phones_tier.append({
+                        't0': round(pi.begin, 6),
+                        't1': round(pi.end,   6),
+                        'text': ipa,
+                    })
 
         labeled_phones = [p['text'] for p in phones_tier if p['text']]
-        if labeled_phones and all(p.lower() in ('spn', 'sp', 'sil') for p in labeled_phones):
-            log.error('  all phones are silence/noise — word(s) %s are OOV in dictionary', words)
+
+        if not labeled_phones:
+            return jsonify({'error': 'MFA produced no phone intervals'}), 500
+
+        if all(p in ('spn', 'sp', 'sil') for p in labeled_phones):
             return jsonify({
                 'error': f"Word(s) {words} not found in the {MFA_DICTIONARY} dictionary — "
                          "cannot align. Try editing the word label to a known spelling."
             }), 422
 
-        # Convert ARPAbet phones to IPA
-        phones_tier = [
-            {**p, 'text': _arpa_to_ipa(p['text']) if p['text'] else p['text']}
-            for p in phones_tier
-        ]
-        ipa_phones = [p['text'] for p in phones_tier if p['text']]
-        log.info('  → %d phones, %d words returned', len(phones_tier), len(words_tier))
-        log.info('  phones (IPA): %s', ipa_phones)
+        log.info('  → %d phones, %d words', len(phones_tier), len(words_tier))
+        log.info('  phones (IPA): %s', labeled_phones)
         if oov_subs:
             log.info('  oov subs: %s', oov_subs)
         log.info('SUCCESS')
 
-        resp = {'phones': phones_tier, 'words': words_tier, 't0': seg_t0, 't1': seg_t1}
+        resp = {'phones': phones_tier, 'words': words_tier,
+                't0': t_offset, 't1': t_offset + duration}
         if oov_subs:
             resp['warning'] = '; '.join(
                 f'"{orig}" not in dictionary — aligned as "{sub}"'
@@ -452,21 +317,24 @@ def align():
             )
         return jsonify(resp)
 
-    except subprocess.TimeoutExpired:
-        log.error('  MFA timed out after 180 s')
-        return jsonify({'error': 'MFA timed out (180 s)'}), 504
     except Exception as exc:
         log.exception('  unexpected error: %s', exc)
         return jsonify({'error': str(exc)}), 500
     finally:
+        import shutil
         shutil.rmtree(tmpdir, ignore_errors=True)
-        shutil.rmtree(mfa_cache_dir, ignore_errors=True)
 
 
 if __name__ == '__main__':
     port = int(os.environ.get('MFA_SERVER_PORT', 5050))
-    log.info('MFA server starting on http://localhost:%d', port)
+
+    try:
+        _init_aligner()
+    except Exception as e:
+        log.error('Failed to load MFA models: %s', e)
+        raise
+
+    log.info('MFA server ready on http://localhost:%d', port)
     log.info('  Acoustic model : %s', MFA_ACOUSTIC_MODEL)
     log.info('  Dictionary     : %s', MFA_DICTIONARY)
-    log.info('  MFA command    : %s', ' '.join(MFA_CMD))
     app.run(host='127.0.0.1', port=port, debug=False)
