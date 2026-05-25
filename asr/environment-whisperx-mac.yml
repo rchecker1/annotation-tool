@@ -1,0 +1,20 @@
+# WhisperX ASR for macOS (Apple Silicon / Intel)
+# Create: conda env create -f environment-whisperx-mac.yml
+name: whisperx
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - ffmpeg
+  - pip
+  - pip:
+      - whisperx==3.8.5
+      - torch
+      - torchaudio
+      - librosa
+      - soundfile
+      - pandas
+      - scipy
+      - transformers
+      - textgrids

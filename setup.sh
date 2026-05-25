@@ -20,6 +20,11 @@ echo ""
 
 # ── 1. Conda environments ─────────────────────────────────────────────────────
 
+IS_MAC=false
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  IS_MAC=true
+fi
+
 echo "[1/4] Creating conda environment: aligner (MFA + annotation server)"
 if conda env list | grep -q "^aligner "; then
   echo "  → 'aligner' already exists, skipping"
@@ -28,24 +33,35 @@ else
   echo "  → done"
 fi
 
-# echo ""
-# echo "[2/4] Creating conda environments for ASR"
+echo ""
+echo "[2/4] Creating conda environments for ASR"
 
-# if conda env list | grep -q "^whisperx "; then
-#   echo "  → 'whisperx' already exists, skipping"
-# else
-#   echo "  Creating 'whisperx' env..."
-#   conda env create -f "$SCRIPT_DIR/asr/environment-whisperx.yml"
-#   echo "  → done"
-# fi
+# WhisperX
+if conda env list | grep -q "^whisperx "; then
+  echo "  → 'whisperx' already exists, skipping"
+else
+  if [ "$IS_MAC" = true ]; then
+    echo "  Creating 'whisperx' env (macOS version)..."
+    conda env create -f "$SCRIPT_DIR/asr/environment-whisperx-mac.yml"
+  else
+    echo "  Creating 'whisperx' env (Linux/CUDA version)..."
+    conda env create -f "$SCRIPT_DIR/asr/environment-whisperx.yml"
+  fi
+  echo "  → done"
+fi
 
-# if conda env list | grep -q "^nemo "; then
-#   echo "  → 'nemo' already exists, skipping"
-# else
-#   echo "  Creating 'nemo' env (Parakeet)..."
-#   conda env create -f "$SCRIPT_DIR/asr/environment-parakeet.yml"
-#   echo "  → done"
-# fi
+# NeMo (Parakeet)
+if conda env list | grep -q "^nemo "; then
+  echo "  → 'nemo' already exists, skipping"
+else
+  if [ "$IS_MAC" = true ]; then
+    echo "  → Skipping 'nemo' env (Parakeet is currently Linux/CUDA only)"
+  else
+    echo "  Creating 'nemo' env (Parakeet)..."
+    conda env create -f "$SCRIPT_DIR/asr/environment-parakeet.yml"
+    echo "  → done"
+  fi
+fi
 
 # ── 2. MFA models ─────────────────────────────────────────────────────────────
 

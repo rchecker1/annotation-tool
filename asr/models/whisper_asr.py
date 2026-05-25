@@ -48,8 +48,12 @@ class WhisperASR:
             raise ImportError("whisperx not installed — activate the 'whisperx' conda env.") from exc
 
         import torch
-        device     = "cuda" if torch.cuda.is_available() else "cpu"
-        compute    = "float16" if torch.cuda.is_available() else "int8"
+        if torch.cuda.is_available():
+            device = "cuda"
+            compute = "float16"
+        else:
+            device = "cpu"
+            compute = "int8"
 
         print(f"[WhisperASR] Loading whisperx {self._checkpoint} on {device}…")
         self._model  = whisperx.load_model(self._checkpoint, device=device, compute_type=compute)

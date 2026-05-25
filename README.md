@@ -28,7 +28,13 @@ From the `code/` directory, run:
 bash setup.sh
 ```
 
-This creates three conda environments (`aligner`, `whisperx`, `nemo`), downloads the MFA English models, and installs the frontend Node dependencies. Takes ~10–20 min on first run depending on internet speed.
+This creates the necessary conda environments (`aligner`, `whisperx`, and `nemo` on Linux), downloads the MFA English models, and installs the frontend Node dependencies.
+
+**macOS Note:**
+- `setup.sh` automatically detects macOS and installs a Mac-compatible `whisperx` environment.
+- `nemo` (Parakeet) is currently only supported on Linux with NVIDIA GPUs and will be skipped on macOS.
+- WhisperX on Mac will use CPU or MPS (Apple Silicon) for inference.
+
 
 ---
 <!-- 
