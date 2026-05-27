@@ -510,7 +510,7 @@ export default function App() {
   const [formantComputing, setFormantComputing] = useState(false);
   const [editMode, setEditMode]         = useState(false);
   const [labelEditor, setLabelEditor]   = useState(null); // { id, tierId, tierType, text, x, y, boxW }
-  const [editShortcut, setEditShortcut] = useState('F1');
+  const [editShortcut, setEditShortcut] = useState('1');
   const [editingShortcut, setEditingShortcut] = useState(false);
   const [showDashboard, setShowDashboard] = useState(false);
   const [playbackRate, setPlaybackRate]   = useState(1);
@@ -524,12 +524,14 @@ export default function App() {
   const [wordsVisible, setWordsVisible]   = useState(true);
   const [phonesVisible, setPhonesVisible] = useState(true);
   const [showTierManager, setShowTierManager] = useState(false);
+  const [selectedTileIds, setSelectedTileIds] = useState(new Set()); // ids of selected tiles (drives rerender)
+  const [selectedTierIds, setSelectedTierIds] = useState(new Set()); // tier border highlight
   const [showExportPopover, setShowExportPopover] = useState(false);
   const MFA_SERVER = 'http://localhost:5050';
   const mfaQueueRef = useRef([]);
   const mfaProcessingRef = useRef(false);
   const playbackRateRef = useRef(1);
-  const editShortcutRef = useRef('F1');
+  const editShortcutRef = useRef('1');
 
   const panelSplitRef  = useRef(0.45);
   const wavePanelRef   = useRef(null);
@@ -576,6 +578,7 @@ export default function App() {
   const editModeRef      = useRef(false);
   const undoStackRef     = useRef([]); // snapshots: { words, phones, customTiers }
   const hoverEdgeRef     = useRef(null); // { id, tierId, side: 'left'|'right' } for cursor feedback
+  const selectedTilesRef = useRef(new Map()); // id → { id, tierId } — multi-selected tiles in edit mode
 
   // ── Canvas element refs ───────────────────────────────────────────────
   const waveCanvasRef    = useRef(null);
@@ -609,6 +612,21 @@ export default function App() {
       const ct = customTiersRef.current.map(t => t.id === tierId ? { ...t, items: updated } : t);
       customTiersRef.current = ct; setCustomTiers([...ct]);
     }
+  }, []);
+
+  // ── Selection helpers ─────────────────────────────────────────────────
+  // Sync selectedTilesRef → React state for re-renders (border + highlight)
+  const syncSelectionState = useCallback(() => {
+    const ids = new Set(selectedTilesRef.current.keys());
+    const tids = new Set([...selectedTilesRef.current.values()].map(e => e.tierId));
+    setSelectedTileIds(ids);
+    setSelectedTierIds(tids);
+  }, []);
+
+  const clearSelection = useCallback(() => {
+    selectedTilesRef.current.clear();
+    setSelectedTileIds(new Set());
+    setSelectedTierIds(new Set());
   }, []);
 
   // ── Undo ──────────────────────────────────────────────────────────────
@@ -869,6 +887,7 @@ export default function App() {
     const fontSize    = Math.round(Math.max(11, Math.min(24, rowH * 0.45)));
     const font        = isWord ? `500 ${fontSize}px Inter,sans-serif` : `${Math.max(10, fontSize - 1)}px 'JetBrains Mono',monospace`;
     const hoverEdge   = hoverEdgeRef.current;
+    const selTiles    = selectedTilesRef.current;
 
     for (const item of items) {
       if (item.t1 < t0 || item.t0 > t1) continue;
@@ -879,13 +898,18 @@ export default function App() {
       const row = item.row ?? 0;
       const ry = row * rowH;
 
+      const isSelected = inEdit && selTiles.has(item.id);
       const hasScore = isWord && item.score != null;
-      const fill   = hasScore ? scoreColor(item.score, inEdit ? 0.40 : 0.28) : (inEdit ? editFill : fillColor);
-      const stroke = hasScore ? scoreColor(item.score, 0.75)                  : strokeColor;
+      const fill   = isSelected ? (isWord ? 'rgba(58,123,213,0.55)' : 'rgba(60,200,130,0.50)')
+                   : hasScore   ? scoreColor(item.score, inEdit ? 0.40 : 0.28)
+                   :              (inEdit ? editFill : fillColor);
+      const stroke = isSelected ? (isWord ? '#7aacf0' : '#60e8a0')
+                   : hasScore   ? scoreColor(item.score, 0.75)
+                   :              strokeColor;
 
       ctx.fillStyle = fill;
       ctx.fillRect(x0, ry + 2, bw, rowH - 4);
-      ctx.strokeStyle = stroke; ctx.lineWidth = inEdit ? 1.5 : 1;
+      ctx.strokeStyle = stroke; ctx.lineWidth = isSelected ? 2 : (inEdit ? 1.5 : 1);
       ctx.strokeRect(x0 + 0.5, ry + 2.5, bw - 1, rowH - 5);
 
       if (inEdit) {
@@ -1347,9 +1371,13 @@ export default function App() {
       if (e.code === 'KeyL') { const n = !loopModeRef.current; loopModeRef.current = n; setLoopMode(n); }
       if (e.code === 'KeyF') { viewRef.current = { t0: 0, t1: DUR }; redraw(); }
       if (e.code === 'Home') { viewRef.current = { t0: 0, t1: Math.min(DUR, 20) }; redraw(); }
-      if (e.code === editShortcutRef.current || e.key === editShortcutRef.current) {
+      // Match stored shortcut against e.code, e.key, and numpad equivalents
+      const _sc = editShortcutRef.current;
+      const _numpadAlias = e.code.startsWith('Numpad') && e.key === _sc;
+      if (e.code === _sc || e.key === _sc || _numpadAlias) {
         e.preventDefault();
         const n = !editModeRef.current; editModeRef.current = n; setEditMode(n);
+        if (!n) clearSelection(); // clear selection when leaving edit mode
         redraw();
       }
       if ((e.ctrlKey || e.metaKey) && e.code === 'KeyZ') {
@@ -1357,6 +1385,30 @@ export default function App() {
         popUndo();
         redraw();
       }
+
+      // ── Edit-mode tile operations ─────────────────────────────────────
+      if (editModeRef.current && selectedTilesRef.current.size > 0) {
+        // Delete / Backspace — remove all selected tiles (across all tiers)
+        if (e.code === 'Backspace' || e.code === 'Delete') {
+          e.preventDefault();
+          pushUndo();
+          // Group selected ids by tier
+          const byTier = new Map();
+          for (const [id, entry] of selectedTilesRef.current) {
+            if (!byTier.has(entry.tierId)) byTier.set(entry.tierId, new Set());
+            byTier.get(entry.tierId).add(id);
+          }
+          for (const [delTierId, idSet] of byTier) {
+            const items = delTierId === 'words'  ? wordsRef.current
+                        : delTierId === 'phones' ? phonesRef.current
+                        : (customTiersRef.current.find(t => t.id === delTierId)?.items ?? []);
+            commitTierItems(delTierId, assignRows(items.filter(it => !idSet.has(it.id))));
+          }
+          clearSelection();
+          redraw();
+        }
+      }
+
       if (e.code === 'ArrowLeft' || e.code === 'ArrowRight') {
         const { t0, t1 } = viewRef.current;
         const span = t1 - t0;
@@ -1368,7 +1420,7 @@ export default function App() {
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [stopPlay, startPlay, redraw, popUndo]);
+  }, [stopPlay, startPlay, redraw, popUndo, pushUndo, commitTierItems, clearSelection]);
 
   // ── Zoom ──────────────────────────────────────────────────────────────
 
@@ -1633,6 +1685,11 @@ export default function App() {
       const DUR = durationRef.current;
 
       if (!hit) {
+        // Clear tile selection when clicking empty space (no modifier)
+        if (!e.ctrlKey && !e.metaKey && selectedTilesRef.current.size > 0) {
+          clearSelection();
+          redraw();
+        }
         // Double-click on empty space: create new annotation
         if (e.detail === 2) {
           const t = xT(e.clientX - rect.left, rect.width);
@@ -1651,6 +1708,34 @@ export default function App() {
       }
 
       const { item, side } = hit;
+      const multiKey = e.ctrlKey || e.metaKey;
+
+      if (multiKey) {
+        // Ctrl/Cmd+click — toggle tile in/out of multi-selection, no drag
+        if (selectedTilesRef.current.has(item.id)) {
+          selectedTilesRef.current.delete(item.id);
+        } else {
+          selectedTilesRef.current.set(item.id, { id: item.id, tierId });
+        }
+        syncSelectionState();
+        redraw();
+        return;
+      }
+
+      if (e.button === 2) return;
+
+      // Plain click on a tile that's already part of a multi-selection:
+      // keep the group selected and start a group drag. Collapse to single
+      // only if the mouse is released without dragging.
+      const wasInGroup = selectedTilesRef.current.size > 1 && selectedTilesRef.current.has(item.id);
+
+      if (!wasInGroup) {
+        // Not in group — immediately select just this tile
+        selectedTilesRef.current.clear();
+        selectedTilesRef.current.set(item.id, { id: item.id, tierId });
+        syncSelectionState();
+        redraw();
+      }
 
       if (e.detail === 2) {
         const x0 = tX(item.t0, rect.width) + rect.left;
@@ -1659,11 +1744,10 @@ export default function App() {
         return;
       }
 
-      if (e.button === 2) return;
-
       pushUndo();
 
       if (side === 'left' || side === 'right') {
+        // Edge drag — always single tile
         const startX = e.clientX;
         const startT = side === 'left' ? item.t0 : item.t1;
         const neighbour = items.find(it =>
@@ -1700,28 +1784,93 @@ export default function App() {
 
       } else if (side === 'body') {
         const startX = e.clientX;
-        const origT0 = item.t0, origT1 = item.t1;
-        const width = origT1 - origT0;
+        let didDrag = false;
+        // Use group drag if this tile is part of an existing multi-selection
+        const isMultiDrag = wasInGroup;
 
-        const onMove = (ev) => {
-          const dx = ev.clientX - startX;
-          const dt = (dx / rect.width) * (viewRef.current.t1 - viewRef.current.t0);
-          const newT0 = Math.max(0, Math.min(DUR - width, origT0 + dt));
-          const updated = itemsRef.current.map(it =>
-            it.id === item.id ? { ...it, t0: newT0, t1: newT0 + width } : it
-          );
-          const withRows = assignRows(updated);
-          commitItems(withRows);
-          drawTier(canvas, withRows, isWord);
-        };
-        const onUp = () => {
-          window.removeEventListener('mousemove', onMove);
-          window.removeEventListener('mouseup', onUp);
-          canvas.style.cursor = 'grab';
-        };
-        canvas.style.cursor = 'grabbing';
-        window.addEventListener('mousemove', onMove);
-        window.addEventListener('mouseup', onUp);
+        if (isMultiDrag) {
+          // ── Group drag: move all selected tiles across all tiers ──────
+          const origsByTier = new Map(); // tierId → [{ id, origT0, origT1 }]
+          for (const [selId, selEntry] of selectedTilesRef.current) {
+            const tItems = selEntry.tierId === 'words'  ? wordsRef.current
+                         : selEntry.tierId === 'phones' ? phonesRef.current
+                         : (customTiersRef.current.find(t => t.id === selEntry.tierId)?.items ?? []);
+            const it = tItems.find(x => x.id === selId);
+            if (!it) continue;
+            if (!origsByTier.has(selEntry.tierId)) origsByTier.set(selEntry.tierId, []);
+            origsByTier.get(selEntry.tierId).push({ id: selId, origT0: it.t0, origT1: it.t1 });
+          }
+          const allOrig = [...origsByTier.values()].flat();
+          const minDt = -Math.min(...allOrig.map(o => o.origT0));
+          const maxDt =  Math.min(...allOrig.map(o => DUR - o.origT1));
+
+          const onMove = (ev) => {
+            didDrag = true;
+            const dx = ev.clientX - startX;
+            const dt = Math.max(minDt, Math.min(maxDt,
+              (dx / rect.width) * (viewRef.current.t1 - viewRef.current.t0)));
+            for (const [dragTierId, origList] of origsByTier) {
+              const tItemsRef = dragTierId === 'words'  ? wordsRef
+                              : dragTierId === 'phones' ? phonesRef
+                              : { current: customTiersRef.current.find(t => t.id === dragTierId)?.items ?? [] };
+              const idSet = new Set(origList.map(o => o.id));
+              const origMap = new Map(origList.map(o => [o.id, o]));
+              const updated = tItemsRef.current.map(it => {
+                if (!idSet.has(it.id)) return it;
+                const o = origMap.get(it.id);
+                return { ...it, t0: o.origT0 + dt, t1: o.origT1 + dt };
+              });
+              const withRows = assignRows(updated);
+              tItemsRef.current = withRows;
+              commitTierItems(dragTierId, withRows);
+              const cv = dragTierId === 'words'  ? wordsCanvasRef.current
+                       : dragTierId === 'phones' ? phonesCanvasRef.current
+                       : customCanvasRefs.current[dragTierId];
+              if (cv) drawTier(cv, withRows, dragTierId === 'words');
+            }
+          };
+          const onUp = () => {
+            window.removeEventListener('mousemove', onMove);
+            window.removeEventListener('mouseup', onUp);
+            canvas.style.cursor = 'grab';
+            if (!didDrag) {
+              // Plain click (no drag) on a grouped tile → collapse to just this tile
+              selectedTilesRef.current.clear();
+              selectedTilesRef.current.set(item.id, { id: item.id, tierId });
+              syncSelectionState();
+              redraw();
+            }
+          };
+          canvas.style.cursor = 'grabbing';
+          window.addEventListener('mousemove', onMove);
+          window.addEventListener('mouseup', onUp);
+
+        } else {
+          // ── Single tile body drag ─────────────────────────────────────
+          const origT0 = item.t0, origT1 = item.t1;
+          const width = origT1 - origT0;
+
+          const onMove = (ev) => {
+            didDrag = true;
+            const dx = ev.clientX - startX;
+            const dt = (dx / rect.width) * (viewRef.current.t1 - viewRef.current.t0);
+            const newT0 = Math.max(0, Math.min(DUR - width, origT0 + dt));
+            const updated = itemsRef.current.map(it =>
+              it.id === item.id ? { ...it, t0: newT0, t1: newT0 + width } : it
+            );
+            const withRows = assignRows(updated);
+            commitItems(withRows);
+            drawTier(canvas, withRows, isWord);
+          };
+          const onUp = () => {
+            window.removeEventListener('mousemove', onMove);
+            window.removeEventListener('mouseup', onUp);
+            canvas.style.cursor = 'grab';
+          };
+          canvas.style.cursor = 'grabbing';
+          window.addEventListener('mousemove', onMove);
+          window.addEventListener('mouseup', onUp);
+        }
       }
     };
 
@@ -1799,7 +1948,7 @@ export default function App() {
       canvas.removeEventListener('mousedown', onMouseDown);
       canvas.removeEventListener('contextmenu', onContextMenu);
     };
-  }, [hitTest, tX, xT, drawTier, redraw, pushUndo, commitTierItems]);
+  }, [hitTest, tX, xT, drawTier, redraw, pushUndo, commitTierItems, clearSelection, syncSelectionState]);
 
   useEffect(() => {
     const c1 = addTierEditInteraction(wordsCanvasRef.current,  wordsRef,  true,  'words');
@@ -2222,43 +2371,45 @@ export default function App() {
           <span className="zoom-label">ZOOM</span>
           <input type="range" min="0" max="100" value={zoomValue} onChange={e => handleZoom(+e.target.value)} title="Zoom level" />
         </div>
-        <button
-          className={`btn${editMode ? ' active' : ''}`}
-          onClick={() => { const n = !editModeRef.current; editModeRef.current = n; setEditMode(n); redraw(); }}
-          title={`Toggle edit mode (${editShortcut})`}
-        >
-          {editMode ? '✎ Editing' : '✎ Edit'}
-        </button>
-        {editingShortcut ? (
-          <input
-            autoFocus
-            className="shortcut-input"
-            placeholder="press a key…"
-            readOnly
-            onKeyDown={(e) => {
-              e.preventDefault();
-              // Ignore bare modifiers
-              if (['Control','Alt','Shift','Meta'].includes(e.key)) return;
-              const label = e.code.startsWith('Key') ? e.key.toUpperCase()
-                : e.code.startsWith('Digit') ? e.key
-                : e.key; // F1–F12, etc.
-              editShortcutRef.current = e.code.startsWith('Key') ? e.code : e.key;
-              setEditShortcut(label);
-              setEditingShortcut(false);
-            }}
-            onBlur={() => setEditingShortcut(false)}
-            title="Press any key to set as the edit mode shortcut"
-          />
-        ) : (
+        {/* ── Split edit button: left half toggles edit, right half rebinds shortcut ── */}
+        <div className={`btn-edit-split${editMode ? ' active' : ''}`}>
           <button
-            className="btn"
-            onClick={() => setEditingShortcut(true)}
-            title="Click to change edit mode shortcut key"
-            style={{ fontFamily: "'JetBrains Mono',monospace", fontSize: 11, minWidth: 36 }}
+            className="btn-edit-split__main"
+            onClick={() => { const n = !editModeRef.current; editModeRef.current = n; setEditMode(n); if (!n) clearSelection(); redraw(); }}
+            title={`Toggle edit mode (${editShortcut})`}
           >
-            {editShortcut}
+            {editMode ? '✎ Editing' : '✎ Edit'}
           </button>
-        )}
+          <div className="btn-edit-split__divider" />
+          {editingShortcut ? (
+            <input
+              autoFocus
+              className="btn-edit-split__capture"
+              placeholder="key…"
+              readOnly
+              onKeyDown={(e) => {
+                e.preventDefault();
+                if (['Control','Alt','Shift','Meta'].includes(e.key)) return;
+                const label = e.code.startsWith('Key') ? e.key.toUpperCase()
+                  : e.code.startsWith('Digit') ? e.key
+                  : e.key;
+                editShortcutRef.current = e.code.startsWith('Key') ? e.code : e.key;
+                setEditShortcut(label);
+                setEditingShortcut(false);
+              }}
+              onBlur={() => setEditingShortcut(false)}
+              title="Press any key to set as the edit mode shortcut"
+            />
+          ) : (
+            <button
+              className="btn-edit-split__badge"
+              onClick={() => setEditingShortcut(true)}
+              title="Click to rebind edit mode shortcut"
+            >
+              {editShortcut}
+            </button>
+          )}
+        </div>
         <button
           className={`btn${showDashboard ? ' active' : ''}`}
           onClick={() => setShowDashboard(v => !v)}
@@ -2497,7 +2648,10 @@ export default function App() {
             ))}
           </div>
 
-          <div className="tier" ref={wrdTierRef} style={wordsVisible ? {} : { display: 'none' }}>
+          <div className="tier" ref={wrdTierRef} style={{
+            ...(wordsVisible ? {} : { display: 'none' }),
+            ...(selectedTierIds.has('words') ? { outline: '1.5px solid rgba(58,123,213,0.7)', outlineOffset: '-1px' } : {}),
+          }}>
             <div className="tier-gutter"><span>WRD</span></div>
             <canvas ref={wordsCanvasRef} />
           </div>
@@ -2518,7 +2672,10 @@ export default function App() {
               }
             )}
           />
-          <div className="tier" ref={phnTierRef} style={phonesVisible ? {} : { display: 'none' }}>
+          <div className="tier" ref={phnTierRef} style={{
+            ...(phonesVisible ? {} : { display: 'none' }),
+            ...(selectedTierIds.has('phones') ? { outline: '1.5px solid rgba(60,200,130,0.7)', outlineOffset: '-1px' } : {}),
+          }}>
             <div className="tier-gutter"><span>PHN</span></div>
             <canvas ref={phonesCanvasRef} />
           </div>
@@ -2553,7 +2710,10 @@ export default function App() {
                     if (el) customTierDivRefs.current[tier.id] = el;
                     else delete customTierDivRefs.current[tier.id];
                   }}
-                  style={tier.visible ? {} : { display: 'none' }}
+                  style={{
+                    ...(tier.visible ? {} : { display: 'none' }),
+                    ...(selectedTierIds.has(tier.id) ? { outline: '1.5px solid rgba(60,200,130,0.7)', outlineOffset: '-1px' } : {}),
+                  }}
                 >
                   <div className="tier-gutter" style={{ flexDirection: 'column', gap: 2 }}>
                     <span style={{ maxWidth: 44, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 9 }} title={tier.name}>
@@ -2582,6 +2742,27 @@ export default function App() {
         </div>
 
         </div>{/* timeline-body */}
+
+        {/* ── Edit mode hint bar ───────────────────────────────────────── */}
+        {editMode && (
+          <div className="edit-hint-bar">
+            <span className="edit-hint-bar__item">
+              <kbd>Click</kbd> select
+            </span>
+            <span className="edit-hint-bar__sep" />
+            <span className="edit-hint-bar__item">
+              <kbd>⌫</kbd> delete
+            </span>
+            <span className="edit-hint-bar__sep" />
+            <span className="edit-hint-bar__item">
+              <kbd>dbl-click</kbd> rename
+            </span>
+            <span className="edit-hint-bar__sep" />
+            <span className="edit-hint-bar__item">
+              <kbd>right-click</kbd> more…
+            </span>
+          </div>
+        )}
 
         <div className="minimap">
           <div className="minimap-gutter" />
