@@ -10,6 +10,7 @@ import {
 let _nextId = 1;
 const nextId = () => _nextId++;
 
+
 const getTierType = (tierId) =>
   tierId === 'phones' ? 'phone' : tierId === 'words' ? 'word' : 'custom';
 
@@ -548,10 +549,12 @@ export default function App() {
   const audioCtxRef      = useRef(null);
   const audioBufferRef   = useRef(null);
   const audioSourceRef   = useRef(null);
-  const playStartCtxRef  = useRef(0);
+  const playStartCtxRef  = useRef(0);  // ctx.currentTime snapshot (kept for reference)
+  const playStartPerfRef = useRef(0);  // performance.now() snapshot — used for display timing
   const playStartAtRef   = useRef(0);
   const playEndAtRef     = useRef(0);
   const rafIdRef         = useRef(null);
+  const playGenRef       = useRef(0);   // incremented each startPlay; stale ticks self-cancel
   const loopModeRef      = useRef(false);
   const playingRef       = useRef(false);
   const playheadRef      = useRef(0);
@@ -1117,6 +1120,7 @@ export default function App() {
     return audioCtxRef.current;
   };
 
+
   const updateTimeDisplay = useCallback(() => {
     if (timeDisplayRef.current)
       timeDisplayRef.current.textContent = `${fmtTime(playheadRef.current)} / ${fmtTime(durationRef.current)}`;
@@ -1139,11 +1143,27 @@ export default function App() {
     redraw();
   }, [stopAudio, clearOverlay, redraw, updateTimeDisplay]);
 
-  const tick = useCallback(() => {
+  const tick = useCallback((gen) => {
+    // Stale-generation guard: if startPlay has been called again since this
+    // RAF chain was started, bail immediately so a new chain is already running.
+    if (gen !== playGenRef.current) return;
     if (!playingRef.current) return;
     const DUR = durationRef.current;
-    const t = playStartAtRef.current + (getAudioCtx().currentTime - playStartCtxRef.current) * playbackRateRef.current;
-    playheadRef.current = Math.min(playEndAtRef.current, t);
+    // Use performance.now() for display — sub-ms resolution, continuous.
+    const elapsed = (performance.now() - playStartPerfRef.current) / 1000;
+    const t = playStartAtRef.current + elapsed * playbackRateRef.current;
+    // Once the computed position reaches the end of the region, pin the bar
+    // exactly at playEndAtRef and keep looping the RAF until onended fires
+    // and increments the generation. Pinning to a fixed value (not the last
+    // pre-end frame) means every loop iteration shows the same stop position.
+    if (t >= playEndAtRef.current) {
+      playheadRef.current = playEndAtRef.current;
+      updateTimeDisplay();
+      drawOverlay();
+      rafIdRef.current = requestAnimationFrame(() => tick(gen));
+      return;
+    }
+    playheadRef.current = t;
     updateTimeDisplay();
     const { t0, t1 } = viewRef.current;
     const span = t1 - t0, pad = span * 0.12;
@@ -1154,27 +1174,59 @@ export default function App() {
     } else {
       drawOverlay();
     }
-    rafIdRef.current = requestAnimationFrame(tick);
+    rafIdRef.current = requestAnimationFrame(() => tick(gen));
   }, [drawOverlay, redraw, updateTimeDisplay]);
 
   const startPlay = useCallback((from) => {
-    console.log('[startPlay] audioBuffer:', !!audioBufferRef.current, 'from:', from);
     if (!audioBufferRef.current) return;
     stopAudio();
     const ctx = getAudioCtx();
-    console.log('[startPlay] ctx state:', ctx.state);
     const doStart = () => {
-      console.log('[startPlay] doStart, ctx.state:', ctx.state);
       const src = ctx.createBufferSource();
       src.buffer = audioBufferRef.current;
       src.connect(ctx.destination);
-      src.playbackRate.value = playbackRateRef.current;
+      const rate = playbackRateRef.current;
+      src.playbackRate.value = rate;
       const sel = selectionRef.current;
       const to = sel ? sel.t1 : durationRef.current;
-      console.log('[startPlay] src.start(0,', from, ',', to - from, ')');
-      src.start(0, from, to - from);
+      // Increment generation before setting timing refs so any in-flight RAF
+      // tick from a previous play chain self-cancels immediately.
+      const gen = ++playGenRef.current;
+      // Sample both clocks at the same instant to get ctx↔perf offset.
+      const perfNow = performance.now();
+      const ctxNow  = ctx.currentTime;
+      // ctx.currentTime advances in 128-sample quanta. src.start(0) fires at
+      // the NEXT quantum boundary after ctxNow, not at ctxNow itself.
+      // Compute where that next boundary is in ctx-time, then map it to
+      // performance.now()-time using the offset we just measured.
+      // sampleRate comes from the AudioContext (always matches the buffer).
+      const sr = ctx.sampleRate;
+      const QUANTUM = 128 / sr;
+      // Next quantum start in ctx-time
+      const nextQuantumCtx = Math.ceil(ctxNow / QUANTUM) * QUANTUM;
+      // How many ms until that quantum starts, in perf-time
+      const perfOffset = (nextQuantumCtx - ctxNow) * 1000;
+      // playStartPerfRef = the perf.now() value at which audio actually begins
+      const audioStartPerf = perfNow + perfOffset;
+      playStartCtxRef.current = nextQuantumCtx;
+      playStartPerfRef.current = audioStartPerf;
+      playStartAtRef.current = from;
+      playEndAtRef.current = to;
+      const audioDur = (to - from) / rate;
+      src.start(0, from);
+      src.stop(nextQuantumCtx + audioDur);
       src.onended = () => {
-        if (loopModeRef.current && sel && playingRef.current) { startPlay(sel.t0); return; }
+        // Pin the bar to the exact end before doing anything else.
+        // onended fires before tick ever reaches playEndAtRef (the RAF
+        // fires at 60 Hz but onended fires at the exact audio sample),
+        // so the last tick frame left the bar short. Force it to the end.
+        playheadRef.current = playEndAtRef.current;
+        updateTimeDisplay();
+        drawOverlay();
+        if (loopModeRef.current && sel && playingRef.current) {
+          startPlay(sel.t0);
+          return;
+        }
         stopAudio();
         setPlaying(false);
         clearOverlay();
@@ -1182,20 +1234,16 @@ export default function App() {
         redraw();
       };
       audioSourceRef.current = src;
-      playStartCtxRef.current = ctx.currentTime;
-      playStartAtRef.current = from;
-      playEndAtRef.current = to;
       playingRef.current = true;
       setPlaying(true);
-      rafIdRef.current = requestAnimationFrame(tick);
+      rafIdRef.current = requestAnimationFrame(() => tick(gen));
     };
     if (ctx.state === 'suspended') {
-      console.log('[startPlay] resuming suspended context...');
       ctx.resume().then(doStart).catch(err => console.error('AudioContext resume failed:', err));
     } else {
       doStart();
     }
-  }, [stopAudio, tick, clearOverlay, redraw, updateTimeDisplay]);
+  }, [stopAudio, tick, clearOverlay, drawOverlay, redraw, updateTimeDisplay]);
 
   // ── Data loading ──────────────────────────────────────────────────────
 
@@ -1512,7 +1560,6 @@ export default function App() {
     let onDown = null;
     if (seekable) {
       onDown = (e) => {
-        if (editModeRef.current) return; // edit mode handles its own mousedown
         const rect = canvas.getBoundingClientRect();
         const startT = xT(e.clientX - rect.left, rect.width);
         let dragged = false;
@@ -1729,6 +1776,39 @@ export default function App() {
           const tierType = getTierType(tierId);
           setLabelEditor({ id: newItem.id, tierId, tierType, text: '', x: (x0 + x1) / 2, y: e.clientY, boxW: Math.max(80, x1 - x0) });
           redraw();
+          return;
+        }
+        // Single-click + drag on empty space in edit mode: create a loop
+        // selection region (same as non-edit mode) so the user can set a
+        // loop region without leaving edit mode.
+        {
+          const startT = xT(e.clientX - rect.left, rect.width);
+          let dragged = false;
+          selectionRef.current = { t0: startT, t1: startT };
+          redraw();
+          const onMove = (ev) => {
+            const t = xT(Math.max(0, Math.min(rect.width, ev.clientX - rect.left)), rect.width);
+            if (Math.abs(t - startT) > 0.015) dragged = true;
+            selectionRef.current = { t0: Math.min(startT, t), t1: Math.max(startT, t) };
+            redraw();
+          };
+          const onUp = (ev) => {
+            window.removeEventListener('mousemove', onMove);
+            window.removeEventListener('mouseup', onUp);
+            if (!dragged) {
+              // Plain click: clear selection and seek playhead
+              selectionRef.current = null;
+              const t = Math.max(0, Math.min(durationRef.current,
+                xT(Math.max(0, Math.min(rect.width, ev.clientX - rect.left)), rect.width)));
+              playheadRef.current = t;
+              updateTimeDisplay();
+              if (playingRef.current) { stopPlay(); startPlay(t); } else redraw();
+            } else {
+              const s = selectionRef.current;
+            }
+          };
+          window.addEventListener('mousemove', onMove);
+          window.addEventListener('mouseup', onUp);
         }
         return;
       }
@@ -1974,7 +2054,7 @@ export default function App() {
       canvas.removeEventListener('mousedown', onMouseDown);
       canvas.removeEventListener('contextmenu', onContextMenu);
     };
-  }, [hitTest, tX, xT, drawTier, redraw, pushUndo, commitTierItems, clearSelection, syncSelectionState]);
+  }, [hitTest, tX, xT, drawTier, redraw, pushUndo, commitTierItems, clearSelection, syncSelectionState, stopPlay, startPlay, updateTimeDisplay]);
 
   useEffect(() => {
     const c1 = addTierEditInteraction(wordsCanvasRef.current,  wordsRef,  true,  'words');
@@ -2793,6 +2873,10 @@ export default function App() {
             <span className="edit-hint-bar__sep" />
             <span className="edit-hint-bar__item">
               <kbd>right-click</kbd> more…
+            </span>
+            <span className="edit-hint-bar__sep" />
+            <span className="edit-hint-bar__item">
+              <kbd>drag empty</kbd> set loop
             </span>
           </div>
         )}
