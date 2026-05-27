@@ -527,6 +527,8 @@ export default function App() {
   const [selectedTileIds, setSelectedTileIds] = useState(new Set()); // ids of selected tiles (drives rerender)
   const [selectedTierIds, setSelectedTierIds] = useState(new Set()); // tier border highlight
   const [showExportPopover, setShowExportPopover] = useState(false);
+  const [saveState, setSaveState] = useState(null); // null | 'saving' | 'saved' | 'error'
+  const saveTimerRef = useRef(null);
   const MFA_SERVER = 'http://localhost:5050';
   const mfaQueueRef = useRef([]);
   const mfaProcessingRef = useRef(false);
@@ -1282,6 +1284,29 @@ export default function App() {
     setShowExportPopover(false);
   }, []);
 
+  // ── Save TextGrid to public/ (dev server only) ───────────────────────
+  const saveTextGrid = useCallback(async () => {
+    const filename = tgFileNameRef.current + '.TextGrid';
+    const content  = serializeTextGrid(durationRef.current, wordsRef.current, phonesRef.current, customTiersRef.current);
+    setSaveState('saving');
+    try {
+      const res = await fetch('/api/save-textgrid', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filename, content }),
+      });
+      const json = await res.json();
+      if (!json.ok) throw new Error(json.error || 'Save failed');
+      setSaveState('saved');
+    } catch (e) {
+      console.error('Save failed:', e);
+      setSaveState('error');
+    } finally {
+      clearTimeout(saveTimerRef.current);
+      saveTimerRef.current = setTimeout(() => setSaveState(null), 2000);
+    }
+  }, []);
+
   // ── Effects ───────────────────────────────────────────────────────────
 
   useEffect(() => {
@@ -1368,6 +1393,7 @@ export default function App() {
           startPlay(sel ? sel.t0 : playheadRef.current);
         }
       }
+      if ((e.ctrlKey || e.metaKey) && e.code === 'KeyS') { e.preventDefault(); saveTextGrid(); return; }
       if (e.code === 'KeyL') { const n = !loopModeRef.current; loopModeRef.current = n; setLoopMode(n); }
       if (e.code === 'KeyF') { viewRef.current = { t0: 0, t1: DUR }; redraw(); }
       if (e.code === 'Home') { viewRef.current = { t0: 0, t1: Math.min(DUR, 20) }; redraw(); }
@@ -1420,7 +1446,7 @@ export default function App() {
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [stopPlay, startPlay, redraw, popUndo, pushUndo, commitTierItems, clearSelection]);
+  }, [stopPlay, startPlay, redraw, popUndo, pushUndo, commitTierItems, clearSelection, saveTextGrid]);
 
   // ── Zoom ──────────────────────────────────────────────────────────────
 
@@ -2324,7 +2350,14 @@ export default function App() {
       )}
 
       <div className="toolbar">
-        <div className="logo">Gwilliams-Praat Aligner{audioFileName && <span>{audioFileName}</span>}</div>
+        <div className="logo">
+          Gwilliams-Praat Aligner{audioFileName && <span>{audioFileName}</span>}
+          {saveState && (
+            <span className={`save-indicator save-indicator--${saveState}`}>
+              {saveState === 'saving' ? '⟳ Saving…' : saveState === 'saved' ? '✓ Saved' : '✕ Save failed'}
+            </span>
+          )}
+        </div>
         <div className="spacer" />
         <div className="transport">
           <button className={`btn${loopMode ? ' active' : ''}`} onClick={() => { const n = !loopModeRef.current; loopModeRef.current = n; setLoopMode(n); }} title="Loop selection (L)">

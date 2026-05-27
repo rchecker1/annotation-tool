@@ -65,7 +65,7 @@ Every hot-path value has **both** a `useState` and a `useRef`. The state drives 
 | `colormapName` | `colormapNameRef` | Spectrogram colormap |
 | `showFormants` | `showFormantsRef` | Formant overlay toggle |
 | `playbackRate` | `playbackRateRef` | Playback speed multiplier |
-| `editShortcut` | `editShortcutRef` | Edit mode keyboard shortcut |
+| `editShortcut` | `editShortcutRef` | Edit mode keyboard shortcut (default `1`) |
 
 **Rule:** always update both together — `ref.current = n; setState(n)`.
 
@@ -78,11 +78,13 @@ All visuals are drawn on `<canvas>` elements via the Canvas 2D API. There is no 
 | `drawWave` | `waveCanvasRef` | Waveform (3 LOD modes) + RMS overlay |
 | `drawSpec` | `specCanvasRef` | Blits cached spectrogram strip + formant lines + frequency labels |
 | `drawRuler` | `rulerCanvasRef` | Time axis with adaptive tick spacing |
-| `drawTier` | `wordsCanvasRef` / `phonesCanvasRef` / custom canvas refs | Annotation tiles with multi-row stacking, confidence color coding |
+| `drawTier` | `wordsCanvasRef` / `phonesCanvasRef` / custom canvas refs | Annotation tiles with multi-row stacking, confidence color coding, selection highlight |
 | `drawMinimap` | `minimapCanvasRef` | Full-duration overview with viewport box |
 | `drawOverlay` | `overlayCanvasRef` | Playhead line only (separate overlay canvas) |
 
 `redraw()` calls all draws except the overlay. During playback, the RAF loop calls `drawOverlay()` and only calls `redraw()` when the view scrolls.
+
+**Important:** whenever selection changes (tile selected/deselected), always call `redraw()` — not `drawTier(canvas, ...)`. Calling only `drawTier` on the clicked canvas leaves stale highlights on other tier canvases.
 
 ### View coordinates
 
@@ -158,13 +160,13 @@ Use `commitTierItems` for every tier write operation — it handles all three ca
 
 `parseTextGrid(text)` returns `{ duration, tiers }`. `loadTextGrid` lowercases keys before lookup, so `"Words"` / `"words"` / `"WORDS"` all work. Any tier that isn't `words` or `phones` becomes a custom tier.
 
-`serializeTextGrid(duration, wordItems, phoneItems, customTiers)` fills gaps with empty intervals for valid Praat output. Export via the ↓ Export button.
+`serializeTextGrid(duration, wordItems, phoneItems, customTiers)` fills gaps with empty intervals for valid Praat output. Used by both the ↓ Export button and the Ctrl/Cmd+S save-to-disk path.
 
 ---
 
 ## Tier Visibility
 
-There is always-visible bar at the top of the `.tiers` section with checkboxes for WRD, PHN, and each custom tier. The tier div itself is `display: none` when hidden — the checkbox stays visible because it lives in the bar above the tier divs, not inside them.
+There is an always-visible bar at the top of the `.tiers` section with checkboxes for WRD, PHN, and each custom tier. The tier div itself is `display: none` when hidden — the checkbox stays visible because it lives in the bar above the tier divs, not inside them.
 
 `wordsVisible` / `phonesVisible` state controls the WRD/PHN divs. Each custom tier has a `visible` field on its object.
 
@@ -194,6 +196,165 @@ ctx.fillText(item.text, (x0 + x1) / 2, ry + rowH / 2 + fontSize * 0.35);
 ```
 
 Word tiles use a slightly heavier weight (`500`); phoneme tiles use a monospace font one pixel smaller for density.
+
+---
+
+## Edit Mode
+
+Toggled by the **split Edit button** in the toolbar or the configurable keyboard shortcut (default `1`).
+
+### Split Edit Button
+
+The Edit button is a single unified control split into two clickable zones:
+
+```
+┌─────────────────┬──────┐
+│   ✎ Edit        │  1   │
+└─────────────────┴──────┘
+        ↑ toggles       ↑ click to rebind
+      edit mode         shortcut
+```
+
+- **Left half** (`.btn-edit-split__main`) — toggles edit mode
+- **Divider** — 1px separator
+- **Right half** (`.btn-edit-split__badge`) — shows current hotkey; click to enter shortcut-capture mode
+- **Capture input** (`.btn-edit-split__capture`) — replaces the badge while waiting for a keypress; `onBlur` cancels
+- When active, the entire button inverts (`.btn-edit-split.active`)
+
+Default shortcut is `1`. The keyboard handler matches against `e.code`, `e.key`, and numpad aliases (so numpad `1` also fires edit mode regardless of NumLock state).
+
+### Edit interactions
+
+`addTierEditInteraction(canvas, itemsRef, isWord, tierId)` registers listeners on each tier canvas:
+
+| Event | Behaviour |
+|---|---|
+| `mousemove` | Cursor feedback, yellow edge highlight |
+| `mouseleave` | Reset cursor and hover state |
+| `mousedown` | `if (e.button === 2) return` first — then seek/select (non-edit) or drag/select (edit) |
+| `contextmenu` | Rename / Merge with next / Delete |
+
+**Committing edits**: use `commitTierItems(tierId, updated)` inside this function.
+
+**Undo**: `pushUndo()` snapshots words + phones + customTiers (max 100). Ctrl/Cmd+Z fires `popUndo()` + `redraw()`.
+
+**Double-click empty** → creates tile, opens label editor.  
+**Double-click tile** → opens inline label editor.  
+**Drag edge** → updates item + any adjacent item sharing that exact edge.  
+**Drag body** → moves tile (single or group), re-runs `assignRows`.
+
+### Edit mode hint bar
+
+A 24px bar appears between the tiers and the minimap **only when edit mode is on**, showing all available shortcuts as `<kbd>` chips:
+
+```
+Click select  |  ⌫ delete  |  dbl-click rename  |  right-click more…
+```
+
+CSS classes: `.edit-hint-bar`, `.edit-hint-bar__item`, `.edit-hint-bar__sep`.
+
+---
+
+## Tile Selection & Multi-Select
+
+### Selection state
+
+```js
+const selectedTilesRef = useRef(new Map()); // id → { id, tierId }
+const [selectedTileIds, setSelectedTileIds] = useState(new Set()); // drives rerender
+const [selectedTierIds, setSelectedTierIds] = useState(new Set()); // drives tier border
+```
+
+Two helpers keep the ref and state in sync:
+
+```js
+syncSelectionState() // ref → setState for both sets
+clearSelection()     // clears ref + both states
+```
+
+**Always call `redraw()` after any selection change** — not just `drawTier(canvas, ...)` — so all tier canvases update simultaneously.
+
+### Selection behaviour
+
+| Action | Result |
+|---|---|
+| **Plain click** a tile (not in a group) | Selects just that tile immediately |
+| **Ctrl/Cmd+click** a tile | Toggles it into/out of the multi-selection; no drag starts |
+| **Plain click** a tile in a multi-selection | Keeps group, starts group drag |
+| **Plain click + no drag** on grouped tile | Collapses to single selection on mouseup (detected via `didDrag` flag) |
+| **Plain click** empty space | Clears entire selection |
+| **Leave edit mode** | Clears entire selection |
+
+### Visual feedback
+
+- Selected tiles draw with a brighter fill + coloured stroke at 2px:
+  - Words: `#7aacf0` (blue)
+  - Phones / custom: `#60e8a0` (green)
+- The `.tier` div for any tier containing a selected tile gets an `outline`:
+  - Words: `rgba(58,123,213,0.7)`
+  - Phones / custom: `rgba(60,200,130,0.7)`
+  - Multiple tier borders can show at once for cross-tier selection
+
+### Group drag
+
+When dragging a tile that is part of a multi-selection (≥2 tiles):
+
+1. Snapshots all selected tiles' `origT0/origT1` grouped by tier at drag start
+2. Computes `minDt` / `maxDt` clamps so no tile crosses `0` or `duration`
+3. On each `mousemove`, applies the same `dt` to all selected tiles across all tiers
+4. Each affected tier canvas is redrawn independently during the drag
+5. On `mouseup` without drag (`didDrag === false`): collapses selection to just the clicked tile
+
+Edge dragging is always single-tile only.
+
+### Keyboard operations in edit mode
+
+| Key | Action |
+|---|---|
+| `⌫` / `Delete` | Delete all selected tiles across all tiers (undoable) |
+
+---
+
+## Save to Disk (Ctrl/Cmd+S)
+
+**Dev only** — requires the Vite dev server (`npm run dev`).
+
+`Ctrl/Cmd+S` serializes the full current state (WRD + PHN + all custom tiers, with scores) and POSTs it to `/api/save-textgrid`, which the Vite dev server middleware writes directly to `public/<filename>.TextGrid`, overwriting the loaded file.
+
+### Vite middleware (`vite.config.js`)
+
+```js
+server.middlewares.use('/api/save-textgrid', (req, res) => {
+  // POST body: { filename: string, content: string }
+  // Safety: only .TextGrid filenames are accepted; path.basename() strips any traversal
+  fs.writeFileSync(dest, content, 'utf8');
+  res.end(JSON.stringify({ ok: true, saved: safe }));
+});
+```
+
+### Frontend (`saveTextGrid` callback)
+
+```js
+const saveTextGrid = useCallback(async () => {
+  const filename = tgFileNameRef.current + '.TextGrid';
+  const content  = serializeTextGrid(duration, words, phones, customTiers);
+  setSaveState('saving');
+  const res = await fetch('/api/save-textgrid', { method: 'POST', body: JSON.stringify({ filename, content }) });
+  setSaveState(json.ok ? 'saved' : 'error');
+  // auto-clears after 2s
+}, []);
+```
+
+### Save indicator
+
+Appears inline in the logo bar:
+- `⟳ Saving…` — blue, request in flight
+- `✓ Saved` — green, fades after 2s
+- `✕ Save failed` — red, fades after 2s
+
+CSS classes: `.save-indicator`, `.save-indicator--saving`, `.save-indicator--saved`, `.save-indicator--error`.
+
+**Note:** this endpoint does not exist in a production build. The ↓ Export button (browser download) works in both dev and production.
 
 ---
 
@@ -245,18 +406,6 @@ To change the key set: edit `public/ipa_keys.json`.
 
 ---
 
-## Edit Mode — Right-Click Fix
-
-`onMouseDown` in `addTierEditInteraction` now returns early on right-click:
-
-```js
-if (e.button === 2) return;
-```
-
-This must be the very first check in the handler. Without it, a right-click triggered selection of the full tier before the `contextmenu` event fired.
-
----
-
 ## MFA Queue System
 
 MFA (Montreal Forced Aligner) runs via `mfa_server.py` on `http://localhost:5050`. The frontend communicates through `mfaWorker.js` (Web Worker).
@@ -277,7 +426,6 @@ const [mfaWarning, setMfaWarning] = useState(null);  // OOV substitution warning
 - Errors appear as a red fixed pill (bottom-right, max 380px wide).
 - OOV substitution warnings appear as an **orange** fixed pill above the error pill:
   ```js
-  // toast style:
   background: '#221a08', border: '1px solid #a07020', color: '#f0b840'
   ```
 
@@ -311,90 +459,19 @@ MFA_ACOUSTIC_MODEL=french_mfa MFA_DICTIONARY=french_mfa python mfa_server.py
 
 ### Persistent aligner (key performance detail)
 
-The aligner is loaded **once at startup** (~16 s) and reused for every request (~1–4 s per alignment):
-
-```python
-from montreal_forced_aligner.models import AcousticModel
-from montreal_forced_aligner.alignment.multiprocessing import KalpyAligner
-from kalpy.fstext.lexicon import LexiconCompiler
-
-model = AcousticModel(str(acoustic_path))
-p = model.parameters
-lc = LexiconCompiler(
-    silence_probability=p['silence_probability'],
-    initial_silence_probability=p['initial_silence_probability'],
-    final_silence_correction=p['final_silence_correction'],
-    final_non_silence_correction=p['final_non_silence_correction'],
-    silence_phone=p['optional_silence_phone'],
-    oov_phone=p['oov_phone'],
-    position_dependent_phones=p['position_dependent_phones'],
-    phones=p['non_silence_phones'],
-)
-lc.load_pronunciations(dict_path)
-lc.create_fsts()
-_kalpy_aligner = KalpyAligner(model, lc)
-```
-
-Per-request alignment:
-
-```python
-from kalpy.utterance import Utterance, Segment
-segment = Segment(str(wav_path), 0.0, duration, 0)
-utt = Utterance(segment, transcript, None, None)
-ctm = _kalpy_aligner.align_utterance(utt)
-ctm.update_utterance_boundaries(t_offset, t_offset + duration)
-```
-
-Do **not** use subprocess (`mfa align …`) — that cold-starts the full FST every call (~60 s).
+The aligner is loaded **once at startup** (~16 s) and reused for every request (~1–4 s per alignment). Do **not** use subprocess (`mfa align …`) — that cold-starts the full FST every call (~60 s).
 
 ### ARPAbet → IPA conversion
 
-MFA outputs ARPAbet phones (e.g. `AH0`, `SH`, `T`). The server converts them to IPA before returning:
-
-```python
-_ARPABET_TO_IPA = {
-    'AA': 'ɑ', 'AE': 'æ', 'AH': 'ʌ', 'AO': 'ɔ', ...
-    'SPN': 'spn', 'SP': 'sp', 'SIL': 'sil',
-}
-
-def _arpa_to_ipa(phone: str) -> str:
-    key = phone.rstrip('012').upper()   # strip stress digits
-    return _ARPABET_TO_IPA.get(key, phone)
-```
+MFA outputs ARPAbet phones (e.g. `AH0`, `SH`, `T`). The server converts them to IPA before returning. Stress digits (`0`, `1`, `2`) are stripped before lookup in `_ARPABET_TO_IPA`.
 
 ### Silence filtering
 
-Trailing silence/noise phones are stripped from the output:
-
-```python
-ipa = _arpa_to_ipa(label)
-if label and label not in ('', '<eps>') and ipa not in ('spn', 'sp', 'sil'):
-    phones_tier.append({...})
-```
+`sil`, `sp`, and `spn` phones are stripped from the output before the response is built.
 
 ### OOV word substitution
 
-Words not in the dictionary are automatically substituted with the nearest Levenshtein match:
-
-```python
-def _closest_dict_word(word: str) -> tuple[str, int] | None:
-    vocab = _load_dict_words()
-    n = len(word)
-    # length-filter for speed: only compare words within max(3, n//2) chars
-    candidates = [w for w in vocab if abs(len(w) - n) <= max(3, n // 2)] or list(vocab)
-    best = min(candidates, key=lambda w: _edit_distance(word, w))
-    return best, _edit_distance(word, best)
-```
-
-When a substitution occurs, the response includes a `warning` field:
-
-```json
-{
-  "warning": "\"yep\" not in dictionary — aligned as \"yes\""
-}
-```
-
-The frontend shows this as an orange toast.
+Words not in the dictionary are automatically substituted with the nearest Levenshtein match (length-filtered for speed). A `warning` field is included in the response and shown as an orange toast in the UI.
 
 ---
 
@@ -406,10 +483,6 @@ Two-level cache:
 |---|---|---|---|
 | Base | `baseSpecCacheRef` | Full audio duration | Low-res (N_FFT=2048, hop=512) |
 | Local | `spectroCacheRef` | Current view ± 1× padding | High-res (adaptive N_FFT) |
-
-**Worker protocol** (`specWorker.js`):
-- Input: `{ ch, sr, t0, t1, hop, N_FFT, pw, ph, colormapName, regionT0, id }`
-- Output: `{ pixels, pw, ph, stripT0, stripT1, regionT0, id }` — transferred zero-copy
 
 **Adaptive N_FFT** in `calcSpecForView`:
 
@@ -427,72 +500,11 @@ Two-level cache:
 
 `formantWorker.js` runs LPC (order 12, 1024-sample frames, 256-sample hop).
 
-**Worker protocol**:
-- Input: `{ ch, sr, regionT0, id }`
-- Output: `{ f1, f2, f3, frames, hop, sr, regionT0, id }` — transferred zero-copy
-
 ---
 
 ## Playback
 
-Web Audio API.
-
-### AudioContext lifecycle — critical detail
-
-`loadAudio` decodes audio using a **temporary, immediately-closed** `AudioContext`:
-
-```js
-const tmpCtx = new (window.AudioContext || window.webkitAudioContext)();
-const buffer = await tmpCtx.decodeAudioData((await file.arrayBuffer()).slice(0));
-tmpCtx.close();
-audioBufferRef.current = buffer;
-```
-
-This is intentional: creating the real context before a user gesture leaves it permanently `'suspended'` in most browsers. The real context is created lazily inside `startPlay`, which is always called from a user gesture (Play button or Space key).
-
-`getAudioCtx()` creates a new context on first call or if the existing one is `'closed'`:
-
-```js
-const getAudioCtx = () => {
-  if (!audioCtxRef.current || audioCtxRef.current.state === 'closed')
-    audioCtxRef.current = new (window.AudioContext || window.webkitAudioContext)();
-  return audioCtxRef.current;
-};
-```
-
-`startPlay(from)` flow:
-1. `stopAudio()` — kills any existing source/RAF
-2. `getAudioCtx()` — get or create context
-3. If `ctx.state === 'suspended'`: `ctx.resume().then(doStart)`; else `doStart()` directly
-4. `doStart()` creates a `BufferSource`, connects it, calls `src.start(0, from, to - from)`, starts RAF
-
-`src.start(0, from, duration)` — the duration arg is source content time. Do **not** divide by `playbackRate`; the browser handles rate internally.
-
-**Playback rate**: 0.25×–2× via dropdown. Changing rate while playing restarts from current playhead.
-
----
-
-## Edit Mode
-
-Toggled by **✎ Edit** button or the configurable keyboard shortcut (default F1).
-
-`addTierEditInteraction(canvas, itemsRef, isWord, tierId)` registers listeners on each tier canvas:
-
-| Event | Behaviour |
-|---|---|
-| `mousemove` | Cursor feedback, yellow edge highlight |
-| `mouseleave` | Reset cursor and hover state |
-| `mousedown` | `if (e.button === 2) return` first — then seek/select (non-edit) or drag boundary/body/create (edit) |
-| `contextmenu` | Rename / Merge with next / Delete |
-
-**Committing edits**: use `commitTierItems(tierId, updated)` inside this function.
-
-**Undo**: `pushUndo()` snapshots words + phones + customTiers (max 100). Ctrl/Cmd+Z fires `popUndo()` + `redraw()`.
-
-**Double-click empty** → creates tile, opens label editor.  
-**Double-click tile** → opens inline label editor.  
-**Drag edge** → updates item + any adjacent item sharing that exact edge.  
-**Drag body** → moves tile, re-runs `assignRows`.
+Web Audio API. `loadAudio` decodes using a temporary, immediately-closed `AudioContext` — the real context is created lazily inside `startPlay` (always called from a user gesture). `src.start(0, from, duration)` — do **not** divide duration by `playbackRate`; the browser handles rate internally.
 
 ---
 
@@ -517,9 +529,12 @@ Items without a score fall back to blue (words) or green (phonemes).
 | L | Toggle loop |
 | F | Fit full duration |
 | Home | Reset to first 20s |
-| F1 (configurable) | Toggle edit mode |
+| `1` (configurable) | Toggle edit mode |
+| Ctrl/Cmd+S | Save TextGrid to `public/` (dev only) |
 | Ctrl/Cmd+Z | Undo |
 | Arrow Left/Right | Pan by 20% of view |
+
+The edit mode shortcut is configurable via the right half of the split Edit button. The default is `1`. The keyboard handler checks `e.code`, `e.key`, and numpad aliases so numpad keys work regardless of NumLock state.
 
 ---
 
@@ -536,6 +551,18 @@ Items without a score fall back to blue (words) or green (phonemes).
   --mono                                /* "JetBrains Mono", monospace */
 }
 ```
+
+Notable component classes:
+
+| Class | Purpose |
+|---|---|
+| `.btn-edit-split` | Split edit+hotkey button wrapper |
+| `.btn-edit-split__main` | Left half — toggles edit mode |
+| `.btn-edit-split__badge` | Right half — shows/rebinds hotkey |
+| `.btn-edit-split__capture` | Key-capture input (shown during rebind) |
+| `.edit-hint-bar` | Shortcut hint bar shown in edit mode |
+| `.save-indicator` | Inline save status in logo bar |
+| `.save-indicator--saving/saved/error` | State variants |
 
 `.panel-divider` and `.tier-divider` share one rule. `.panel-gutter` and `.tier-gutter` share a base rule; `.tier-gutter` adds `flex-direction: column; gap: 3px`.
 
@@ -561,9 +588,7 @@ Items without a score fall back to blue (words) or green (phonemes).
 
 - **Tier name lookup is case-insensitive.** `loadTextGrid` lowercases all keys before lookup.
 
-- **AudioContext must only be created inside a user gesture handler** (`startPlay`, which is called from onClick or keydown). Creating it during `useEffect` auto-load leaves it permanently `'suspended'`. The decode step uses a separate temporary context that is closed immediately after decode.
-
-- **`loadAudio` does NOT create the real AudioContext.** It uses `tmpCtx` only for decode. `audioCtxRef` is only populated when `startPlay` runs.
+- **AudioContext must only be created inside a user gesture handler.** Creating it during `useEffect` auto-load leaves it permanently `'suspended'`. The decode step uses a separate temporary context that is closed immediately after decode.
 
 - **`LabelEditorPopover` must be a proper React component** (not an inline IIFE) so that `React.useRef` creates a stable ref across renders. An inline `{ current: null }` object literal is recreated every render and breaks IPA key insertion.
 
@@ -573,45 +598,17 @@ Items without a score fall back to blue (words) or green (phonemes).
 
 - **Right-click check `if (e.button === 2) return` must be the first statement** in `onMouseDown`. Any hit-testing before this check causes unwanted tier selection on right-click.
 
-- **MFA uses `english_us_arpa`** (200k-word ARPAbet dictionary), not `english_mfa` (42k words). The larger dictionary handles common words like "yep" and "pineapples" that `english_mfa` marks as OOV.
-
-- **MFA output is ARPAbet** (`AH0`, `SH`, etc.) and must be converted to IPA before storing. Stress digits (`0`, `1`, `2`) are stripped before lookup in `_ARPABET_TO_IPA`.
+- **MFA uses `english_us_arpa`** (200k-word ARPAbet dictionary), not `english_mfa` (42k words).
 
 - **Never use `mfa align` subprocess for per-request alignment.** Cold-starting the FST takes ~60 s. Use the persistent `KalpyAligner` loaded at server startup.
 
----
+- **Selection changes must call `redraw()`**, not `drawTier(canvas, ...)`. Only `redraw()` repaints all tier canvases; calling `drawTier` on just the clicked canvas leaves stale highlights on other tiers.
 
-## Recent Changes
+- **`selectedTilesRef` is a `Map<id, {id, tierId}>`**, not a single object. `syncSelectionState()` and `clearSelection()` are the only two helpers that should touch both the ref and the state sets together.
 
-- **Font scaling in tiles** — `drawTier` now scales font size with `rowH * 0.45`, clamped 11–24px. Word tier uses Inter 500; phoneme tier uses JetBrains Mono at 1px smaller.
+- **Group drag defers selection collapse to `mouseup`** via a `didDrag` boolean. On `mousedown` the group is kept intact so dragging works; if no movement occurred, `onUp` collapses to single selection.
 
-- **IPA keyboard format** — `ipa_keys.json` changed from a flat array to an object `{ symbol: "example with **bold**" }`. The keyboard now shows a hover tooltip with the phoneme in slashes and a bolded example word.
-
-- **`IpaExample` component** — parses `**bold**` markdown inline. Used inside `IpaTooltip`.
-
-- **`IpaTooltip` component** — `position: fixed`, initialises off-screen to avoid top-left flash, measures and positions above the hovered key after layout.
-
-- **`LabelEditorPopover` component** — extracted from an inline IIFE into a proper React component with stable `React.useRef`. This fixed IPA key insertion which was silently broken when the keyboard ref was a plain object literal.
-
-- **Right-click tier selection fix** — `if (e.button === 2) return` added as the first check in `onMouseDown`, preventing right-click from triggering tile selection before the context menu fires.
-
-- **MFA server rewrite** — `mfa_server.py` now uses persistent `KalpyAligner` + `LexiconCompiler` from the `kalpy` Python API. First request still waits ~16 s for model init; subsequent requests take 1–4 s instead of ~60 s.
-
-- **ARPAbet → IPA conversion** — MFA returns ARPAbet phones; `_arpa_to_ipa()` converts them (stripping stress digits) before the response is sent to the frontend.
-
-- **Silence phone filtering** — `sil`, `sp`, and `spn` phones are stripped from the extracted phone intervals before the response is built.
-
-- **OOV word substitution** — words not in the `english_us_arpa` dictionary are automatically substituted with the nearest Levenshtein match (length-filtered for speed). A `warning` field is included in the response and shown as an orange toast in the UI.
-
-- **`mfaWarning` state** — new state for OOV substitution warnings, shown as an orange pill toast (separate from the red error toast). Style: `background: '#221a08', border: '1px solid #a07020', color: '#f0b840'`.
-
-- **`setup.sh`** — new one-time setup script in `code/` that creates the `aligner`, `whisperx`, and `nemo` conda environments, downloads `english_us_arpa` acoustic + dictionary models, and runs `npm install` for the frontend.
-
-- **`README.md` rewrite** — full end-to-end guide covering setup, ASR, annotation, export, and in-browser MFA re-alignment.
-
-- **Audio playback resolved** — the debug `console.log('[startPlay] ...')` lines documented in the previous session have been removed; audio plays correctly.
-
-- **Score export resolved** — `serializeTextGrid` now preserves `score` fields on export (was listed as a known gap previously).
+- **`/api/save-textgrid` only exists in dev.** The Vite middleware writes directly to `public/`. In production builds there is no such endpoint — use the ↓ Export download instead.
 
 ---
 
@@ -620,4 +617,5 @@ Items without a score fall back to blue (words) or green (phonemes).
 - No cross-tier boundary snapping (phoneme edges to word edges)
 - No waveform-level edit (only tier tiles)
 - No multi-file batch processing
-- `buildMelSpectrogram` in `dsp.js` is called on load but its result is only used as a presence check in `drawSpec` — actual pixel rendering goes through the worker cache
+- `buildMelSpectrogram` in `dsp.js` result is only used as a presence check; actual rendering goes through the worker cache
+- `Ctrl/Cmd+S` save does not work in production builds (no server-side endpoint)

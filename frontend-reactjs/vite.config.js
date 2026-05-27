@@ -16,6 +16,30 @@ function publicFilesPlugin() {
         res.setHeader('Content-Type', 'application/json');
         res.end(JSON.stringify({ wavs, tgs }));
       });
+
+      server.middlewares.use('/api/save-textgrid', (req, res) => {
+        if (req.method !== 'POST') {
+          res.statusCode = 405; res.end('Method Not Allowed'); return;
+        }
+        let body = '';
+        req.on('data', chunk => { body += chunk; });
+        req.on('end', () => {
+          try {
+            const { filename, content } = JSON.parse(body);
+            // Safety: only allow writing .TextGrid files inside public/
+            const safe = path.basename(filename);
+            if (!/\.TextGrid$/i.test(safe)) {
+              res.statusCode = 400; res.end('Only .TextGrid files allowed'); return;
+            }
+            const dest = path.resolve(__dirname, 'public', safe);
+            fs.writeFileSync(dest, content, 'utf8');
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ ok: true, saved: safe }));
+          } catch (e) {
+            res.statusCode = 500; res.end(JSON.stringify({ ok: false, error: String(e) }));
+          }
+        });
+      });
     },
   };
 }
