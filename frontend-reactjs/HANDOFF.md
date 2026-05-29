@@ -223,6 +223,22 @@ The Edit button is a single unified control split into two clickable zones:
 
 Default shortcut is `1`. The keyboard handler matches against `e.code`, `e.key`, and numpad aliases (so numpad `1` also fires edit mode regardless of NumLock state).
 
+### Waveform interaction in edit mode
+
+The waveform canvas uses `addInteraction(canvas, seekable=true)` for scroll/zoom/seek. Previously its `onDown` handler had an early return when edit mode was active, which prevented the user from dragging a loop selection region on the waveform while in edit mode.
+
+That guard has been removed. The waveform's `onDown` now runs in both modes. If the user clicks/drags on the waveform while in edit mode, it creates or updates the loop selection region (same as non-edit mode). Tile editing is handled by `addTierEditInteraction` on the separate tier canvases, so there is no conflict.
+
+```js
+// addInteraction — onDown (waveform):
+onDown = (e) => {
+  // No early-return for editModeRef.current — waveform drag works in edit mode too.
+  const rect = canvas.getBoundingClientRect();
+  ...
+```
+
+The tier canvases in edit mode (`addTierEditInteraction`) also support dragging on empty space to set a loop selection region, mirroring the same behaviour.
+
 ### Edit interactions
 
 `addTierEditInteraction(canvas, itemsRef, isWord, tierId)` registers listeners on each tier canvas:
@@ -504,7 +520,63 @@ Two-level cache:
 
 ## Playback
 
-Web Audio API. `loadAudio` decodes using a temporary, immediately-closed `AudioContext` — the real context is created lazily inside `startPlay` (always called from a user gesture). `src.start(0, from, duration)` — do **not** divide duration by `playbackRate`; the browser handles rate internally.
+Web Audio API. `loadAudio` decodes using a temporary, immediately-closed `AudioContext` — the real context is created lazily inside `startPlay` (always called from a user gesture).
+
+### Clock and timing
+
+`ctx.currentTime` advances in 128-sample quanta (~2.9 ms at 44.1 kHz). `src.start(0)` fires at the **next** quantum boundary after `ctx.currentTime`, not at the exact call instant. Using `ctx.currentTime` directly for the display clock therefore introduces sub-quantum jitter (up to ~3 ms) that compounds across loop iterations.
+
+The fix uses `performance.now()` for the display clock, anchored to the next quantum boundary:
+
+```js
+const sr = ctx.sampleRate;
+const QUANTUM = 128 / sr;
+const nextQuantumCtx = Math.ceil(ctxNow / QUANTUM) * QUANTUM;  // when audio actually starts
+const perfOffset = (nextQuantumCtx - ctxNow) * 1000;           // ms until that quantum
+playStartPerfRef.current = performance.now() + perfOffset;      // perf anchor
+playStartCtxRef.current  = nextQuantumCtx;
+
+src.start(0, from);
+src.stop(nextQuantumCtx + audioDur);
+```
+
+In `tick(gen)` the display position is computed as:
+```js
+const elapsed = (performance.now() - playStartPerfRef.current) / 1000;
+const t = playStartAtRef.current + elapsed * playbackRateRef.current;
+```
+
+### Stale-RAF guard (`playGenRef`)
+
+Each `startPlay` call increments `playGenRef.current` and passes the new generation value to `tick(gen)`. Every tick frame checks `gen !== playGenRef.current` and returns immediately if stale. This ensures only one RAF chain is active at a time even during rapid loop restarts.
+
+### End-pinning
+
+`onended` fires at the exact audio sample boundary — always before the next 16.7 ms RAF frame. The last tick therefore leaves the playhead a few ms short of the end. Two places pin it:
+
+1. **`tick`**: if `t >= playEndAtRef.current`, sets `playheadRef.current = playEndAtRef.current` and keeps looping the RAF until `onended` fires (does not let the position exceed the end).
+2. **`onended`**: unconditionally sets `playheadRef.current = playEndAtRef.current` and calls `drawOverlay()` before doing anything else (loop restart or stop).
+
+### Loop restart
+
+```js
+src.onended = () => {
+  playheadRef.current = playEndAtRef.current;  // pin first
+  updateTimeDisplay();
+  drawOverlay();
+  if (loopModeRef.current && sel && playingRef.current) {
+    startPlay(sel.t0);   // increments playGenRef → kills current RAF chain
+    return;
+  }
+  stopAudio();
+  setPlaying(false);
+  clearOverlay();
+  updateTimeDisplay();
+  redraw();
+};
+```
+
+**Do not** divide `audioDur` by `playbackRate` when passing to `src.stop()` — the Web Audio API applies rate internally, so `src.stop(startCtx + (to - from) / rate)` is the correct call.
 
 ---
 
@@ -572,7 +644,15 @@ Notable component classes:
 
 - **`setupCanvas` must be called at the start of every draw function.** It resets the transform.
 
-- **`src.start(0, from, duration)` — do not divide duration by `playbackRate`.** The Web Audio API applies rate internally.
+- **`src.stop(nextQuantumCtx + audioDur)` — compute `audioDur = (to - from) / rate`.** `src.start` is scheduled at `nextQuantumCtx`, so stop must be relative to that same anchor, not `ctx.currentTime`.
+
+- **Do not use `ctx.currentTime` for the visual playhead clock.** It advances in 128-sample quanta (~2.9 ms), causing jitter that compounds across loop iterations. Use `performance.now()` anchored to the next quantum boundary (`playStartPerfRef`).
+
+- **`playGenRef` must be incremented before setting timing refs.** Any in-flight `tick(gen)` frame checks its generation against `playGenRef.current` on the next RAF fire — incrementing first guarantees the old chain self-cancels before the new timing refs are written.
+
+- **`onended` pins the playhead before calling `startPlay` or `stopAudio`.** `onended` fires at the exact audio sample; the last RAF frame left the bar a few ms short. Pinning in `onended` (and in `tick` when `t >= playEndAtRef`) ensures the displayed stop position is always the exact selection end.
+
+- **Waveform `onDown` has no early-return for `editModeRef.current`.** Edit mode is handled by the tier canvases' own interaction handlers; the waveform handler runs identically in both modes.
 
 - **`assignRows` uses a 1ms tolerance** (`end - 0.001`) for floating-point TextGrid artifacts.
 

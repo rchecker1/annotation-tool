@@ -334,7 +334,7 @@ function ExportPopover({ defaultName, customTiers, onExport, onClose }) {
               Praat compatible
             </div>
             <div style={{ fontSize: 10, color: '#6b6a65', fontFamily: 'Inter,sans-serif', marginTop: 1 }}>
-              WRD + PHN only · <em>{base}_praat.TextGrid</em>
+              WRD + PHN{customTiers.length > 0 ? ` + ${customTiers.map(t => t.name).join(', ')}` : ''} · <em>{base}_praat.TextGrid</em>
             </div>
           </div>
         </label>
@@ -1321,8 +1321,7 @@ export default function App() {
   // ── Export TextGrid ───────────────────────────────────────────────────
   const doExportTextGrid = useCallback((filename, includeCustom) => {
     const praatCompat = !includeCustom;
-    const tiers = includeCustom ? customTiersRef.current : [];
-    const text = serializeTextGrid(durationRef.current, wordsRef.current, phonesRef.current, tiers, praatCompat);
+    const text = serializeTextGrid(durationRef.current, wordsRef.current, phonesRef.current, customTiersRef.current, praatCompat);
     const blob = new Blob([text], { type: 'text/plain' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
