@@ -502,6 +502,7 @@ export default function App() {
   const [duration, setDuration]         = useState(70);
   const [playing, setPlaying]           = useState(false);
   const [loopMode, setLoopMode]         = useState(false);
+  const [autoPlayTile, setAutoPlayTile] = useState(false);
   const [zoomValue, setZoomValue]       = useState(72);
   const [popup, setPopup]               = useState(null);
   const [dropping, setDropping]         = useState(false);
@@ -559,6 +560,7 @@ export default function App() {
   const rafIdRef         = useRef(null);
   const playGenRef       = useRef(0);   // incremented each startPlay; stale ticks self-cancel
   const loopModeRef      = useRef(false);
+  const autoPlayTileRef  = useRef(false);
   const playingRef       = useRef(false);
   const playheadRef      = useRef(0);
   const selectionRef     = useRef(null);
@@ -1865,7 +1867,11 @@ export default function App() {
         selectedTilesRef.current.clear();
         selectedTilesRef.current.set(item.id, { id: item.id, tierId });
         syncSelectionState();
+        selectionRef.current = { t0: item.t0, t1: item.t1 };
+        playheadRef.current = item.t0;
+        updateTimeDisplay();
         redraw();
+        if (autoPlayTileRef.current) { stopPlay(); startPlay(item.t0); }
       }
 
       if (e.detail === 2) {
@@ -1969,7 +1975,11 @@ export default function App() {
               selectedTilesRef.current.clear();
               selectedTilesRef.current.set(item.id, { id: item.id, tierId });
               syncSelectionState();
+              selectionRef.current = { t0: item.t0, t1: item.t1 };
+              playheadRef.current = item.t0;
+              updateTimeDisplay();
               redraw();
+              if (autoPlayTileRef.current) { stopPlay(); startPlay(item.t0); }
             }
           };
           canvas.style.cursor = 'grabbing';
@@ -2815,6 +2825,17 @@ export default function App() {
                 <span style={{ fontSize: 9, fontFamily: "'JetBrains Mono',monospace", color: visible ? '#c8c6c1' : '#45454d' }}>{label}</span>
               </label>
             ))}
+            <span style={{ marginLeft: 'auto' }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 3, cursor: 'pointer' }} title="Auto-play tile audio on click">
+                <input
+                  type="checkbox"
+                  className="tier-visibility-check"
+                  checked={autoPlayTile}
+                  onChange={e => { autoPlayTileRef.current = e.target.checked; setAutoPlayTile(e.target.checked); }}
+                />
+                <span style={{ fontSize: 9, fontFamily: "'JetBrains Mono',monospace", color: autoPlayTile ? '#c8c6c1' : '#45454d' }}>AUTO-PLAY</span>
+              </label>
+            </span>
           </div>
 
           <div className="tier" ref={wrdTierRef} style={{
