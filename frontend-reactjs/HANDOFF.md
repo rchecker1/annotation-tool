@@ -34,11 +34,14 @@ src/
   App.jsx             Everything — all state, all canvas drawing, all interaction
   parseTextGrid.js    Praat TextGrid parser
   dsp.js              DSP helpers used on main thread (mel spec, RMS, LPC formants, colormaps)
-  specWorker.js       Web Worker: mel spectrogram → RGBA pixels
-  formantWorker.js    Web Worker: LPC formant tracking → F1/F2/F3 arrays
+  specWorker.js       Web Worker: base mel spectrogram on load → RGBA pixels (JS FFT)
+  formantWorker.js    UNUSED — superseded by dsp_server.py; kept as dead code
   mfaWorker.js        Web Worker: encodes WAV + POSTs to MFA server + returns phones/words
   canvasUtils.js      setupCanvas() (HiDPI), fmtTime()
   index.css           All styles (uses CSS custom properties — see :root block at top)
+
+dsp_server.py         Python DSP script: librosa mel spectrogram + parselmouth Praat formants
+                      Called by Vite middleware via execFile; requires conda env "aligner"
 
 public/
   *.wav               Audio file (exactly one expected)
@@ -160,7 +163,11 @@ Use `commitTierItems` for every tier write operation — it handles all three ca
 
 `parseTextGrid(text)` returns `{ duration, tiers }`. `loadTextGrid` lowercases keys before lookup, so `"Words"` / `"words"` / `"WORDS"` all work. Any tier that isn't `words` or `phones` becomes a custom tier.
 
-`serializeTextGrid(duration, wordItems, phoneItems, customTiers)` fills gaps with empty intervals for valid Praat output. Used by both the ↓ Export button and the Ctrl/Cmd+S save-to-disk path.
+`serializeTextGrid(duration, wordItems, phoneItems, customTiers, praatCompat)` fills gaps with empty intervals for valid Praat output. Used by both the ↓ Export button and the Ctrl/Cmd+S save-to-disk path.
+
+The export dialog offers two modes — both include **all tiers** (words, phones, and all custom tiers):
+- **Full** (`praatCompat=false`) — includes `score = N` fields on word intervals. Reloads cleanly in this tool.
+- **Praat compatible** (`praatCompat=true`) — omits `score` fields. Opens in Praat without warnings. Custom tiers are still written as standard `IntervalTier` blocks which Praat handles fine.
 
 ---
 
@@ -339,6 +346,14 @@ Edge dragging is always single-tile only.
 
 ### Vite middleware (`vite.config.js`)
 
+Three dev-only endpoints are registered:
+
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/api/public-files` | GET | Lists `*.wav` and `*.TextGrid` files in `public/` for auto-load |
+| `/api/save-textgrid` | POST | Writes serialized TextGrid to `public/<filename>.TextGrid` |
+| `/api/compute-dsp` | POST | Shells out to `dsp_server.py` for mel spectrogram + formants |
+
 ```js
 server.middlewares.use('/api/save-textgrid', (req, res) => {
   // POST body: { filename: string, content: string }
@@ -495,26 +510,85 @@ Words not in the dictionary are automatically substituted with the nearest Leven
 
 Two-level cache:
 
-| Cache | Ref | Coverage | Resolution |
+| Cache | Ref | Coverage | How computed |
 |---|---|---|---|
-| Base | `baseSpecCacheRef` | Full audio duration | Low-res (N_FFT=2048, hop=512) |
-| Local | `spectroCacheRef` | Current view ± 1× padding | High-res (adaptive N_FFT) |
+| Base | `baseSpecCacheRef` | Full audio duration | `calcBaseSpec` — JS worker (`specWorker.js`), N_FFT=2048, hop=512. Runs once on load. |
+| Local | `spectroCacheRef` | Current view | `calcSpecForView` — Python/librosa via `/api/compute-dsp`. User-triggered via "Enhance Spectrogram" button. |
 
-**Adaptive N_FFT** in `calcSpecForView`:
+### Base spec (on load)
 
-| Samples in view | N_FFT |
-|---|---|
-| < 4 000 | 128 |
-| < 10 000 | 256 |
-| < 30 000 | 512 |
-| < 80 000 | 1 024 |
-| ≥ 80 000 | 2 048 |
+`calcBaseSpec(buf)` is called from `loadAudio`. It uses the JS `specWorker.js` to produce a low-res strip covering the full duration. This renders immediately without a server round-trip and gives a usable overview before any Python computation.
+
+### Enhanced spec (on demand)
+
+`calcSpecForView` POSTs to `/api/compute-dsp` with the current view's `t0`/`t1`, canvas pixel dimensions (`pw`/`ph`), mel bands, and FFT size. Python returns RGBA pixels at the exact canvas resolution — no interpolation mismatch. The result is stored in `spectroCacheRef` and replaces the base spec for the current view.
+
+Parameters are user-configurable via the ⚙ dropdown on the "Enhance Spectrogram" button:
+- `specNMelsRef` — mel bands (40 / 80 / 128 / 160), default 128
+- `specNFftRef` — FFT size (256 / 512 / 1024 / 2048), default 512
+
+### Cache hit check
+
+`drawSpec` blits `spectroCacheRef` when `local.stripT0 <= t0 && local.stripT1 >= t1` (no `ph` check — Python returns pixels at the exact requested dimensions so height always matches). Falls back to `baseSpecCacheRef` when the local cache doesn't cover the view.
+
+### `/api/compute-dsp` (Vite middleware)
+
+```js
+POST /api/compute-dsp
+Body: { wavFile, t0, t1, nMels, nFft, colormap, pw, ph }
+```
+
+Shells out to `dsp_server.py` via `execFile` with `maxBuffer: 50 MB`. Returns:
+```json
+{
+  "spec":     { "pixels": [...], "pw": N, "ph": N, "stripT0": N, "stripT1": N },
+  "formants": { "f1": [...], "f2": [...], "f3": [...], "times": [...], "regionT0": N, "sr": N }
+}
+```
+
+Only works in dev (Vite server must be running). Requires the `aligner` conda env to be present with `librosa` and `praat-parselmouth` installed.
+
+### Frequency axis
+
+Drawn directly on the spectrogram canvas at the end of `drawSpec` (not a separate canvas). Ticks at 100, 200, 500, 1k, 2k, 4k, 8 kHz with faint horizontal guide lines. Label color is chosen per colormap:
+
+| Colormap | Label color | Shadow |
+|---|---|---|
+| jet | black | white |
+| inferno | white | black |
+| viridis | white | dark purple |
+| greys | black | white |
 
 ---
 
 ## Formant Tracking
 
-`formantWorker.js` runs LPC (order 12, 1024-sample frames, 256-sample hop).
+Formants are computed by `dsp_server.py` using `parselmouth` (Python bindings for Praat). The Praat Burg algorithm (`To Formant (burg)`) with a 5500 Hz ceiling is the same algorithm Praat itself uses, giving linguistically correct F1/F2/F3 values.
+
+Triggered by "Generate Formants" button → `calcFormantForView` → `/api/compute-dsp` → returns `formants` alongside the spectrogram. Both are updated together in one request.
+
+### Formant data shape
+
+```js
+formantTrackRef.current = {
+  f1: Float32Array,   // Hz per frame (0 = unvoiced/silence)
+  f2: Float32Array,
+  f3: Float32Array,
+  times: number[],    // absolute time in seconds for each frame
+  regionT0: number,   // start time of the computed region
+  sr: number,
+}
+```
+
+`times[]` replaces the old `hop/frames` indexing. The renderer in `drawSpec` does a binary search on `times[]` to find the nearest frame for each canvas pixel — no frame-rate arithmetic needed.
+
+### Toggle
+
+The "Generate Formants" card has an inline pill toggle ("Overlay on/off") that sets `showFormantsRef` without recomputing. Formants are drawn on the spectrogram canvas only when `showFormantsRef.current === true`.
+
+### Legacy worker
+
+`formantWorker.js` (JS LPC, order 12) is no longer called. It is kept in the repo but is dead code.
 
 ---
 
@@ -688,7 +762,13 @@ Notable component classes:
 
 - **Group drag defers selection collapse to `mouseup`** via a `didDrag` boolean. On `mousedown` the group is kept intact so dragging works; if no movement occurred, `onUp` collapses to single selection.
 
-- **`/api/save-textgrid` only exists in dev.** The Vite middleware writes directly to `public/`. In production builds there is no such endpoint — use the ↓ Export download instead.
+- **`/api/save-textgrid` and `/api/compute-dsp` only exist in dev.** The Vite middleware writes directly to `public/` and shells out to Python. Neither endpoint exists in production builds.
+
+- **`calcSpecForView` and `calcFormantForView` both require `publicWavFileRef.current` to be set.** This ref is only populated when the wav was auto-loaded from `public/` — it is `null` for any other source. Both functions guard on it and return early if null.
+
+- **Do not name local variables `pw`/`ph` in the same scope as the destructured `data.spec`.** `const { pixels, pw, ph } = data.spec` will conflict with any outer `const pw`/`const ph` in the same block, causing a `ReferenceError: Cannot access uninitialized variable`. Use aliased destructuring: `const { pixels, pw: spw, ph: sph } = data.spec`.
+
+- **The `spectroCacheRef` local cache has no `ph` equality check.** Python returns pixels at exactly the requested canvas dimensions, so the height always matches. The old JS worker path stored `ph` and checked it; that check has been removed.
 
 ---
 

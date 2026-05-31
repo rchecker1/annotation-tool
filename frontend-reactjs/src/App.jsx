@@ -509,6 +509,9 @@ export default function App() {
   const [showFormants, setShowFormants] = useState(false);
   const [specComputing, setSpecComputing] = useState(false);
   const [formantComputing, setFormantComputing] = useState(false);
+  const [specNMels, setSpecNMels] = useState(128);
+  const [specNFft, setSpecNFft] = useState(512);
+  const [showSpecSettings, setShowSpecSettings] = useState(false);
   const [editMode, setEditMode]         = useState(false);
   const [labelEditor, setLabelEditor]   = useState(null); // { id, tierId, tierType, text, x, y, boxW }
   const [editShortcut, setEditShortcut] = useState('1');
@@ -573,11 +576,14 @@ export default function App() {
   const phonesRef        = useRef([]);
   const customTiersRef   = useRef([]);
   const tgFileNameRef    = useRef('annotation');
+  const publicWavFileRef = useRef(null); // filename of the wav in public/ (e.g. "audio.wav")
   const customCanvasRefs = useRef({}); // keyed by tier id
   const customTierDivRefs = useRef({}); // keyed by tier id — the .tier div element
   const durationRef      = useRef(70);
   const colormapNameRef  = useRef('jet');
   const showFormantsRef  = useRef(false);
+  const specNMelsRef     = useRef(128);
+  const specNFftRef      = useRef(512);
   const rmsEnvRef        = useRef(null);
   const formantTrackRef  = useRef(null);
   const editModeRef      = useRef(false);
@@ -588,6 +594,7 @@ export default function App() {
   // ── Canvas element refs ───────────────────────────────────────────────
   const waveCanvasRef    = useRef(null);
   const specCanvasRef    = useRef(null);
+  const freqAxisCanvasRef = useRef(null);
   const rulerCanvasRef   = useRef(null);
   const wordsCanvasRef   = useRef(null);
   const phonesCanvasRef  = useRef(null);
@@ -808,7 +815,7 @@ export default function App() {
 
       const local = spectroCacheRef.current;
       const base  = baseSpecCacheRef.current;
-      if (local.canvas && local.stripT0 <= t0 && local.stripT1 >= t1 && local.ph === ph) {
+      if (local.canvas && local.stripT0 <= t0 && local.stripT1 >= t1) {
         blitStrip(local);
       } else if (base.canvas && base.stripT0 <= t0 && base.stripT1 >= t1) {
         blitStrip(base);
@@ -818,10 +825,14 @@ export default function App() {
     if (showFormantsRef.current) {
       const ft = formantTrackRef.current;
       if (ft) {
-        const rT0 = ft.regionT0 ?? 0;
-        const regionDur = ((ft.frames - 1) * ft.hop + (ft.frameSize ?? 1024)) / ft.sr;
         const FMAX = Math.min(8000, ft.sr / 2);
         const colors = ['rgba(255,80,80,0.85)', 'rgba(80,220,80,0.85)', 'rgba(80,140,255,0.85)'];
+        // Support both Praat times[] and legacy hop/frames formats
+        const useTimes = Array.isArray(ft.times) && ft.times.length > 0;
+        const rT0 = ft.regionT0 ?? 0;
+        const regionDur = useTimes
+          ? ft.times[ft.times.length - 1] - ft.times[0] + 0.001
+          : ((ft.frames - 1) * ft.hop + (ft.frameSize ?? 1024)) / ft.sr;
         for (const [fi, fdata] of [[0, ft.f1], [1, ft.f2], [2, ft.f3]]) {
           ctx.strokeStyle = colors[fi]; ctx.lineWidth = 1.5;
           ctx.beginPath();
@@ -830,23 +841,48 @@ export default function App() {
             const t = t0 + (cx / w) * (t1 - t0);
             const localT = t - rT0;
             if (localT < 0 || localT > regionDur) { started = false; continue; }
-            const fr = Math.max(0, Math.min(ft.frames - 1, Math.floor((localT / regionDur) * ft.frames)));
+            let fr;
+            if (useTimes) {
+              // Binary search for nearest frame by time
+              const tAbs = t;
+              let lo = 0, hi = ft.times.length - 1;
+              while (lo < hi) { const mid = (lo + hi) >> 1; if (ft.times[mid] < tAbs) lo = mid + 1; else hi = mid; }
+              fr = lo;
+            } else {
+              fr = Math.max(0, Math.min(ft.frames - 1, Math.floor((localT / regionDur) * ft.frames)));
+            }
             const hz = fdata[fr];
             if (!hz) { started = false; continue; }
-            const y = h - (hz / FMAX) * h;
-            if (!started) { ctx.moveTo(cx, y); started = true; } else ctx.lineTo(cx, y);
+            const fy = h - (hz / FMAX) * h;
+            if (!started) { ctx.moveTo(cx, fy); started = true; } else ctx.lineTo(cx, fy);
           }
           ctx.stroke();
         }
       }
     }
-    ctx.fillStyle = 'rgba(255,255,255,0.4)';
-    ctx.font = "9px 'JetBrains Mono',monospace"; ctx.textAlign = 'left';
-    ctx.fillText('8kHz', 4, 11);
-    ctx.fillText('1kHz', 4, h * (1 - 1000/8000) - 1);
-    ctx.fillText('100Hz', 4, h - 3);
+    // Frequency axis labels — color chosen to contrast against each colormap's background
+    const labelColor = { jet: '#000000', inferno: '#ffffff', viridis: '#ffffff', greys: '#000000' }[colormapNameRef.current] ?? '#ffffff';
+    const shadowColor = { jet: '#ffffff', inferno: '#000000', viridis: '#000020', greys: '#ffffff' }[colormapNameRef.current] ?? '#000000';
+    const FMAX = 8000;
+    const ticks = [100, 200, 500, 1000, 2000, 4000, 8000];
+    ctx.font = "9px 'JetBrains Mono',monospace";
+    ctx.textAlign = 'left';
+    for (const hz of ticks) {
+      const y = Math.round(h - (hz / FMAX) * h) + 0.5;
+      ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+      ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
+      const label = hz >= 1000 ? `${hz / 1000}k` : `${hz}`;
+      ctx.shadowColor = shadowColor; ctx.shadowBlur = 3;
+      ctx.fillStyle = labelColor;
+      ctx.fillText(label, 3, Math.max(9, y - 2));
+      ctx.shadowBlur = 0;
+    }
+
     drawPlayheadLine(ctx, w, h);
   }, [drawSelectionRect, drawPlayheadLine]);
+
+  const drawFreqAxis = useCallback(() => {}, []);
 
   const drawRuler = useCallback(() => {
     const s = setupCanvas(rulerCanvasRef.current);
@@ -987,7 +1023,7 @@ export default function App() {
   }, []);
 
   const redraw = useCallback(() => {
-    drawWave(); drawSpec(); drawRuler();
+    drawWave(); drawSpec(); drawFreqAxis(); drawRuler();
     drawTier(wordsCanvasRef.current, wordsRef.current, true);
     drawTier(phonesCanvasRef.current, phonesRef.current, false);
     for (const tier of customTiersRef.current) {
@@ -995,7 +1031,7 @@ export default function App() {
       if (cv) drawTier(cv, tier.items, false);
     }
     drawMinimap();
-  }, [drawWave, drawSpec, drawRuler, drawTier, drawMinimap]);
+  }, [drawWave, drawSpec, drawFreqAxis, drawRuler, drawTier, drawMinimap]);
 
   // ── Spectrogram computation ───────────────────────────────────────────
 
@@ -1028,89 +1064,78 @@ export default function App() {
     );
   }, [drawSpec]);
 
-  const calcSpecForView = useCallback(() => {
-    const buf = audioBufferRef.current;
-    if (!buf) return;
+  const calcSpecForView = useCallback(async () => {
+    if (!audioBufferRef.current || !publicWavFileRef.current) return;
     setSpecComputing(true);
     const { t0, t1 } = viewRef.current;
-    const span = t1 - t0;
-    const DUR = durationRef.current;
     const canvas = specCanvasRef.current;
     const dpr = window.devicePixelRatio || 1;
     const pw = canvas ? Math.round(canvas.offsetWidth * dpr) : 1400;
     const ph = canvas ? Math.round(canvas.offsetHeight * dpr) : 400;
-    const sr = buf.sampleRate;
+    try {
+      const res = await fetch('/api/compute-dsp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          wavFile: publicWavFileRef.current,
+          t0, t1,
+          nMels: specNMelsRef.current,
+          nFft: specNFftRef.current,
+          colormap: colormapNameRef.current,
+          pw, ph,
+        }),
+      });
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
 
-    const pad = span;
-    const stripT0 = Math.max(0, t0 - pad);
-    const stripT1 = Math.min(DUR, t1 + pad);
-    const stripSpan = stripT1 - stripT0;
-    const stripPw = Math.round(pw * (stripSpan / span));
-
-    const samplesInView = span * sr;
-    let N_FFT = 2048;
-    if (samplesInView < 4000)       N_FFT = 128;
-    else if (samplesInView < 10000) N_FFT = 256;
-    else if (samplesInView < 30000) N_FFT = 512;
-    else if (samplesInView < 80000) N_FFT = 1024;
-
-    const targetFrames = stripPw * 2;
-    let hop = N_FFT / 4;
-    for (const h of [N_FFT/8, N_FFT/4, N_FFT/2, 64, 128, 256, 512]) {
-      const hInt = Math.max(1, Math.round(h));
-      if ((stripSpan * sr) / hInt >= targetFrames) { hop = hInt; break; }
-      hop = hInt;
-    }
-
-    const startSample = Math.max(0, Math.floor(stripT0 * sr) - N_FFT);
-    const endSample   = Math.min(buf.length, Math.ceil(stripT1 * sr) + N_FFT);
-    const regionT0    = startSample / sr;
-    const region      = buf.getChannelData(0).slice(startSample, endSample);
-
-    if (specWorkerRef.current) specWorkerRef.current.terminate();
-    const worker = new Worker(new URL('./specWorker.js', import.meta.url), { type: 'module' });
-    specWorkerRef.current = worker;
-
-    worker.onmessage = ({ data: res }) => {
-      worker.terminate();
-      specWorkerRef.current = null;
-      spectroCacheRef.current = { canvas: pixelsToCanvas(res), ph, stripT0, stripT1, stripPw };
-      setSpecComputing(false);
+      const { pixels, pw: spw, ph: sph, stripT0, stripT1 } = data.spec;
+      const imgData = new ImageData(new Uint8ClampedArray(pixels), spw, sph);
+      const offscreen = new OffscreenCanvas(spw, sph);
+      offscreen.getContext('2d').putImageData(imgData, 0, 0);
+      spectroCacheRef.current = { canvas: offscreen, ph: sph, stripT0, stripT1, stripPw: spw };
       drawSpec();
-    };
-
-    worker.postMessage(
-      { ch: region, sr, t0: stripT0, t1: stripT1, hop, N_FFT, pw: stripPw, ph, colormapName: colormapNameRef.current, regionT0, id: 1 },
-      [region.buffer]
-    );
+    } catch (e) {
+      console.error('[calcSpecForView]', e);
+    } finally {
+      setSpecComputing(false);
+    }
   }, [drawSpec]);
 
-  const calcFormantForView = useCallback(() => {
-    const buf = audioBufferRef.current;
-    if (!buf) return;
+  const calcFormantForView = useCallback(async () => {
+    if (!audioBufferRef.current || !publicWavFileRef.current) return;
     setFormantComputing(true);
     const { t0, t1 } = viewRef.current;
-    const sr = buf.sampleRate;
-    const startSample = Math.max(0, Math.floor(t0 * sr) - 1024);
-    const endSample   = Math.min(buf.length, Math.ceil(t1 * sr) + 1024);
-    const regionT0    = startSample / sr;
-    const region      = buf.getChannelData(0).slice(startSample, endSample);
+    try {
+      const res = await fetch('/api/compute-dsp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          wavFile: publicWavFileRef.current,
+          t0, t1,
+          nMels: specNMelsRef.current,
+          nFft: specNFftRef.current,
+          colormap: colormapNameRef.current,
+        }),
+      });
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
 
-    if (formantWorkerRef.current) formantWorkerRef.current.terminate();
-    const worker = new Worker(new URL('./formantWorker.js', import.meta.url), { type: 'module' });
-    formantWorkerRef.current = worker;
-
-    worker.onmessage = ({ data }) => {
-      worker.terminate();
-      formantWorkerRef.current = null;
-      formantTrackRef.current = { ...data, regionT0 };
+      formantTrackRef.current = { ...data.formants };
       formantViewRef.current  = { t0, t1 };
-      setFormantComputing(false);
+
+      const { pixels, pw: spw, ph: sph, stripT0, stripT1 } = data.spec;
+      const imgData = new ImageData(new Uint8ClampedArray(pixels), spw, sph);
+      const offscreen = new OffscreenCanvas(spw, sph);
+      offscreen.getContext('2d').putImageData(imgData, 0, 0);
+      spectroCacheRef.current = { canvas: offscreen, ph: sph, stripT0, stripT1, stripPw: spw };
+
       if (!showFormantsRef.current) { showFormantsRef.current = true; setShowFormants(true); }
       drawSpec();
-    };
-
-    worker.postMessage({ ch: region, sr, regionT0, id: 1 }, [region.buffer]);
+    } catch (e) {
+      console.error('[calcFormantForView]', e);
+    } finally {
+      setFormantComputing(false);
+    }
   }, [drawSpec]);
 
   // ── Audio context ─────────────────────────────────────────────────────
@@ -1405,6 +1430,7 @@ export default function App() {
         const res = await fetch(`/${encodeURIComponent(wavs[0])}`);
         if (!res.ok) throw new Error(res.statusText);
         await loadAudio(new File([await res.blob()], wavs[0], { type: 'audio/wav' }));
+        publicWavFileRef.current = wavs[0];
         setAudioFileName(wavs[0].replace(/\.[^.]+$/, ''));
         setSetupError(null);
       } catch(e) { console.warn('Audio auto-load failed:', e); }
@@ -2073,9 +2099,6 @@ export default function App() {
         const reader = new FileReader();
         reader.onload = (ev) => loadTextGrid(ev.target.result);
         reader.readAsText(f);
-      } else {
-        setAudioFileName(f.name.replace(/\.[^.]+$/, ''));
-        loadAudio(f);
       }
     };
     window.addEventListener('dragover', onOver);
@@ -2643,12 +2666,6 @@ export default function App() {
           📄 Load TextGrid
           <input type="file" accept=".TextGrid,.textgrid" onChange={handleTGFile} />
         </label>
-        <select className="colormap-select" value={colormapName} onChange={e => handleColormapChange(e.target.value)} title="Spectrogram colormap">
-          <option value="jet">Jet</option>
-          <option value="inferno">Inferno</option>
-          <option value="viridis">Viridis</option>
-          <option value="greys">Greys</option>
-        </select>
       </div>
 
       <div style={{ flex: 1, minHeight: 0, display: 'flex', overflow: 'hidden' }}>
@@ -2679,32 +2696,72 @@ export default function App() {
           <div className="panel" ref={specPanelRef} style={{ flex: 1 - panelSplitRef.current }}>
             <div className="panel-gutter">SP</div>
             <div className="panel-body">
-              <div className="panel-tag">Spectrogram</div>
+              <div className="panel-tag" style={{ left: 36 }}>Mel Spectrogram</div>
               <canvas ref={specCanvasRef} style={{ height: '100%' }} />
               <div className="spec-overlay-btns">
-                <button
-                  className={`calc-spec-btn${specComputing ? ' computing' : ''}`}
-                  onClick={calcSpecForView}
-                  disabled={specComputing}
-                  title="Calculate high-res spectrogram for current view"
-                >
-                  {specComputing ? '⟳ Calc…' : '⟳ Calc Spec'}
-                </button>
-                <div className="formant-btn-group">
+                <select className="colormap-select" value={colormapName} onChange={e => handleColormapChange(e.target.value)} title="Spectrogram colormap">
+                  <option value="jet">Jet</option>
+                  <option value="inferno">Inferno</option>
+                  <option value="viridis">Viridis</option>
+                  <option value="greys">Greys</option>
+                </select>
+                <div className="formant-card">
+                  <div className="formant-card__top-row">
+                    <button
+                      className={`formant-card__generate${specComputing ? ' computing' : ''}`}
+                      onClick={calcSpecForView}
+                      disabled={specComputing}
+                      title="Enhance spectrogram resolution for the current view"
+                    >
+                      {specComputing ? '⟳ Enhancing…' : '⟳ Enhance Spectrogram'}
+                    </button>
+                    <button
+                      className={`formant-card__settings-toggle${showSpecSettings ? ' open' : ''}`}
+                      onClick={() => setShowSpecSettings(v => !v)}
+                      title="Spectrogram parameters"
+                    >⚙</button>
+                  </div>
+                  {showSpecSettings && (
+                    <div className="formant-card__settings">
+                      <label className="spec-param-row">
+                        <span>Mel bands</span>
+                        <select value={specNMels} onChange={e => { const v = +e.target.value; setSpecNMels(v); specNMelsRef.current = v; }}>
+                          <option value={40}>40</option>
+                          <option value={80}>80</option>
+                          <option value={128}>128</option>
+                          <option value={160}>160</option>
+                        </select>
+                      </label>
+                      <label className="spec-param-row">
+                        <span>FFT size</span>
+                        <select value={specNFft} onChange={e => { const v = +e.target.value; setSpecNFft(v); specNFftRef.current = v; }}>
+                          <option value={256}>256</option>
+                          <option value={512}>512</option>
+                          <option value={1024}>1024</option>
+                          <option value={2048}>2048</option>
+                        </select>
+                      </label>
+                    </div>
+                  )}
+                </div>
+                <div className="formant-card">
                   <button
-                    className={`calc-spec-btn${showFormants ? ' active' : ''}`}
-                    onClick={() => { const n = !showFormants; showFormantsRef.current = n; setShowFormants(n); redraw(); }}
-                    title="Toggle F1/F2/F3 overlay"
-                  >
-                    {showFormants ? '● Formants' : '○ Formants'}
-                  </button>
-                  <button
-                    className={`calc-spec-btn${formantComputing ? ' computing' : ''}`}
+                    className={`formant-card__generate${formantComputing ? ' computing' : ''}`}
                     onClick={calcFormantForView}
                     disabled={formantComputing}
-                    title="Calculate formants for current view"
+                    title="Generate F1·F2·F3 formants for current view"
                   >
-                    {formantComputing ? '⟳ …' : '⟳ Calc F1·F2·F3'}
+                    {formantComputing ? '⟳ Generating…' : '⟳ Generate Formants'}
+                  </button>
+                  <button
+                    className={`formant-card__toggle${showFormants ? ' on' : ''}`}
+                    onClick={() => { const n = !showFormants; showFormantsRef.current = n; setShowFormants(n); redraw(); }}
+                    title="Toggle formant overlay"
+                  >
+                    <span className="formant-card__toggle-track">
+                      <span className="formant-card__toggle-thumb" />
+                    </span>
+                    <span className="formant-card__toggle-label">{showFormants ? 'Overlay on' : 'Overlay off'}</span>
                   </button>
                 </div>
               </div>

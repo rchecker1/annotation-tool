@@ -236,4 +236,5 @@ dependencies:
       - seaborn==0.13.2
       - tzdata==2026.2
       - werkzeug==3.1.8
+      - praat-parselmouth
 prefix: /Users/alisartazkhan/miniconda3/envs/aligner

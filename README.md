@@ -125,15 +125,21 @@ In edit mode, a hint bar appears at the bottom of the tier area showing all avai
 Click **↓ Export** to download the annotations as a file. Two format options:
 
 - **Full export** — includes all tiers (WRD + PHN + custom) and confidence scores; best for reloading into this tool
-- **Praat compatible** — standard TextGrid format with WRD + PHN only, loadable in Praat
+- **Praat compatible** — standard TextGrid format with WRD + PHN + any custom tiers, loadable in Praat (confidence score fields are omitted)
 
 ---
 
 ## Spectrogram & formants
 
-- **⟳ Calc Spec** — compute a high-resolution spectrogram for the current view. Resolution adapts to zoom level automatically.
+Controls appear stacked on the right side of the spectrogram tier:
+
 - **Colormap selector** — switch between `jet`, `inferno`, `viridis`, and `greys`.
-- **○ Formants / ⟳ Calc F1·F2·F3** — overlay F1/F2/F3 formant tracks on the spectrogram. Computed via LPC (order 12) in a background worker.
+- **Enhance Spectrogram** — recomputes the spectrogram for the current view using Python/librosa at full canvas resolution. Click **⚙** to expand settings:
+  - **Mel bands** — 40 / 80 / 128 / 160 (default 128)
+  - **FFT size** — 256 / 512 / 1024 / 2048 (default 512)
+- **Generate Formants** — overlays F1/F2/F3 formant tracks computed by Praat's Burg algorithm (via `parselmouth`). Includes an on/off pill toggle to show or hide the overlay without recomputing.
+
+> **Note:** Enhance Spectrogram and Generate Formants require the `aligner` conda environment to be present (it is created by `setup.sh`). The Vite dev server (`npm run dev`) shells out to `dsp_server.py` in the `aligner` env for these features. They are not available in production builds.
 
 ---
 
@@ -229,10 +235,13 @@ code/
 │   │   ├── whisper_asr.py    — WhisperX wrapper
 │   │   └── parakeet.py       — NVIDIA Parakeet wrapper
 │   ├── environment-whisperx.yml
+│   ├── environment-whisperx-mac.yml
 │   ├── environment-parakeet.yml
 │   ├── run_whisper.sh        — convenience script for WhisperX
 │   └── run_parakeet.sh       — convenience script for Parakeet
 └── frontend-reactjs/         — annotation tool (React + Vite)
+    ├── dsp_server.py         — Python DSP: mel spectrogram (librosa) + formants (parselmouth/Praat)
+    ├── vite.config.js        — Vite config + dev-server middleware (/api/compute-dsp, /api/save-textgrid)
     ├── public/               — place your .wav and .TextGrid here
     └── src/
         └── App.jsx           — main application

@@ -2,6 +2,10 @@ import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react-swc';
 import fs from 'fs';
 import path from 'path';
+import { execFile } from 'child_process';
+
+const PYTHON = '/Users/alisartazkhan/miniconda3/envs/aligner/bin/python';
+const DSP_SCRIPT = path.resolve(__dirname, 'dsp_server.py');
 
 function publicFilesPlugin() {
   return {
@@ -15,6 +19,39 @@ function publicFilesPlugin() {
         const tgs  = files.filter(f => /\.TextGrid$/i.test(f));
         res.setHeader('Content-Type', 'application/json');
         res.end(JSON.stringify({ wavs, tgs }));
+      });
+
+      server.middlewares.use('/api/compute-dsp', (req, res) => {
+        if (req.method !== 'POST') {
+          res.statusCode = 405; res.end('Method Not Allowed'); return;
+        }
+        let body = '';
+        req.on('data', chunk => { body += chunk; });
+        req.on('end', () => {
+          try {
+            const { wavFile, t0, t1, nMels = 128, nFft = 512, colormap = 'inferno', pw = 1400, ph = 400 } = JSON.parse(body);
+            const safe = path.basename(wavFile);
+            if (!/\.wav$/i.test(safe)) {
+              res.statusCode = 400; res.end('Only .wav files allowed'); return;
+            }
+            const wavPath = path.resolve(__dirname, 'public', safe);
+            execFile(PYTHON, [DSP_SCRIPT, wavPath, String(t0), String(t1), String(nMels), String(nFft), colormap, String(pw), String(ph)],
+              { maxBuffer: 50 * 1024 * 1024 },
+              (err, stdout, stderr) => {
+                if (err) {
+                  console.error('[dsp_server]', stderr);
+                  res.statusCode = 500;
+                  res.end(JSON.stringify({ error: String(err), stderr }));
+                  return;
+                }
+                res.setHeader('Content-Type', 'application/json');
+                res.end(stdout);
+              }
+            );
+          } catch (e) {
+            res.statusCode = 500; res.end(JSON.stringify({ error: String(e) }));
+          }
+        });
       });
 
       server.middlewares.use('/api/save-textgrid', (req, res) => {

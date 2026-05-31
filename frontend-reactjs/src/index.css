@@ -200,8 +200,68 @@ html, body {
   position: absolute; top: 6px; right: 8px; z-index: 5;
   display: flex; flex-direction: column; align-items: flex-end; gap: 4px;
 }
-.formant-btn-group {
-  display: flex; flex-direction: row; gap: 3px;
+.formant-card {
+  display: flex; flex-direction: column; gap: 0;
+  border: 1px solid rgba(58,123,213,0.5); border-radius: 6px;
+  background: rgba(20,20,28,0.82); backdrop-filter: blur(4px);
+  overflow: hidden;
+}
+.formant-card__top-row {
+  display: flex; align-items: stretch;
+}
+.formant-card__settings-toggle {
+  padding: 4px 7px; border: none; border-left: 1px solid rgba(58,123,213,0.25);
+  background: transparent; color: #555; font-size: 11px;
+  font-family: inherit; cursor: pointer;
+  transition: background 100ms, color 100ms;
+}
+.formant-card__settings-toggle:hover,
+.formant-card__settings-toggle.open { background: rgba(58,123,213,0.15); color: #7aacf0; }
+.formant-card__settings {
+  display: flex; flex-direction: column; gap: 4px;
+  padding: 6px 8px; border-top: 1px solid rgba(58,123,213,0.2);
+}
+.spec-param-row {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 8px; font-size: 10px; color: #888; white-space: nowrap;
+}
+.spec-param-row select {
+  background: #13131a; color: #c0c0cc; border: 1px solid #2e2e3a;
+  border-radius: 3px; padding: 1px 4px; font-size: 10px;
+  font-family: inherit; cursor: pointer;
+}
+.formant-card__generate {
+  padding: 4px 10px; border: none; border-bottom: 1px solid rgba(58,123,213,0.25);
+  background: transparent; color: #7aacf0; font-size: 11px;
+  font-family: inherit; cursor: pointer; white-space: nowrap;
+  transition: background 100ms, color 100ms;
+}
+.formant-card__generate:hover { background: rgba(58,123,213,0.2); color: #c8deff; }
+.formant-card__generate.computing { color: #f0c070; cursor: wait; }
+.formant-card__generate:disabled { pointer-events: none; }
+.formant-card__toggle {
+  display: flex; align-items: center; gap: 6px;
+  padding: 4px 10px; border: none; background: transparent;
+  cursor: pointer; font-family: inherit; font-size: 11px; color: #666;
+  transition: color 100ms;
+}
+.formant-card__toggle:hover { color: #999; }
+.formant-card__toggle.on { color: #7aacf0; }
+.formant-card__toggle-track {
+  position: relative; width: 24px; height: 12px; border-radius: 6px;
+  background: #2a2a38; border: 1px solid #3a3a50;
+  transition: background 150ms, border-color 150ms; flex-shrink: 0;
+}
+.formant-card__toggle.on .formant-card__toggle-track {
+  background: rgba(58,123,213,0.5); border-color: var(--accent);
+}
+.formant-card__toggle-thumb {
+  position: absolute; top: 1px; left: 1px;
+  width: 8px; height: 8px; border-radius: 50%;
+  background: #555; transition: transform 150ms, background 150ms;
+}
+.formant-card__toggle.on .formant-card__toggle-thumb {
+  transform: translateX(12px); background: #7aacf0;
 }
 .calc-spec-btn {
   padding: 4px 10px; border-radius: 5px; border: 1px solid rgba(58,123,213,0.5);
