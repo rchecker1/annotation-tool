@@ -77,6 +77,8 @@ You can also load files at any time without restarting:
 | Fit full audio | `F` |
 | Reset to start | `Home` |
 | Seek | Click anywhere on the waveform, spectrogram, or ruler |
+| Play tile | Click a tile in edit mode (sets play region to onset→offset); press Play or Space |
+| Auto-play tile | Enable AUTO-PLAY in the SHOW bar — clicking a tile starts playback immediately |
 
 ### Tiers
 
@@ -86,7 +88,7 @@ The annotation area shows stacked tiers below the waveform and spectrogram:
 - **PHN** — phoneme-level annotations (green tiles). Includes an IPA virtual keyboard when renaming.
 - **Custom tiers** — any additional tiers loaded from the TextGrid, or created with the **+ Add Tier** button.
 
-Use the **SHOW** checkbox bar at the top of the tier area to hide/show individual tiers. Tiers can be resized by dragging the dividers between them.
+Use the **SHOW** checkbox bar at the top of the tier area to hide/show individual tiers. Tiers can be resized by dragging the dividers between them. The **AUTO-PLAY** checkbox (right side of the SHOW bar) makes clicking any tile immediately play its audio without needing to press Play.
 
 ### Edit mode
 
@@ -95,9 +97,9 @@ Press **`1`** (default, configurable) or click the **✎ Edit** button to enter 
 In edit mode, a hint bar appears at the bottom of the tier area showing all available shortcuts.
 
 **Single tile operations:**
-- **Click a tile** — select it (highlighted border on the tile and its tier)
-- **Drag a boundary** — hover near a tile edge (yellow highlight appears), then drag left/right; the adjacent tile's boundary moves with it
-- **Drag a tile body** — drag the centre of a tile to shift it in time
+- **Click a tile** — select it; moves the playhead to its onset and sets the play region to onset→offset
+- **Drag a boundary** — hover near a tile edge (yellow highlight appears), then drag left/right; snaps to nearby boundaries in other tiers. Hold **Alt** to disable snapping
+- **Drag a tile body** — drag the centre of a tile to shift it in time; snaps to nearby boundaries in other tiers
 - **Double-click a tile** — open the inline label editor; phoneme tiles show an IPA virtual keyboard
 - **Double-click empty space** — create a new annotation tile at that position
 - **Right-click a tile** — context menu: Rename / Merge with next / Delete

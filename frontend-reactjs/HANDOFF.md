@@ -263,15 +263,34 @@ The tier canvases in edit mode (`addTierEditInteraction`) also support dragging 
 
 **Double-click empty** → creates tile, opens label editor.  
 **Double-click tile** → opens inline label editor.  
-**Drag edge** → updates item + any adjacent item sharing that exact edge.  
-**Drag body** → moves tile (single or group), re-runs `assignRows`.
+**Drag edge** → updates item + any adjacent item sharing that exact edge; snaps to cross-tier boundaries.  
+**Drag body** → moves tile (single or group), re-runs `assignRows`; snaps to cross-tier boundaries.
+
+### Cross-tier boundary snapping
+
+When dragging a tile edge or body, the dragged position magnetically snaps to any boundary in another tier within 10px. A yellow dashed guide line is drawn across all canvases at the snap target. Hold **Alt** to disable snapping for that drag.
+
+Two helpers power snapping:
+
+```js
+getAllTiers()                        // returns [{ id, items }] for words + phones + all custom tiers
+getCrossTierBoundaries(excludeId)   // flat array of all t0/t1 values from tiers other than excludeId
+```
+
+**Edge drag snap**: snaps to `crossBounds + same-tier non-neighbour bounds`, clamped to `[minT, maxT]`.
+
+**Single body drag snap**: treats the tile as a virtual rect; snaps whichever of `t0`/`t1` is closest to any boundary, shifts the whole tile.
+
+**Group drag snap**: computes `groupOrigT0` (leftmost t0) and `groupOrigT1` (rightmost t1) across all selected tiles. Snaps the group's leading or trailing edge. Boundaries from tiers that have **no** selected tiles are used for cross-tier snap; unselected items in dragged tiers are used for same-tier snap — preventing the group's own boundaries from triggering spurious snaps.
+
+`drawSnapGuide()` paints the guide on all canvases after every `drawTier` call during drag. On `mouseup`, `snapGuideRef.current = null` and `redraw()` clears it.
 
 ### Edit mode hint bar
 
 A 24px bar appears between the tiers and the minimap **only when edit mode is on**, showing all available shortcuts as `<kbd>` chips:
 
 ```
-Click select  |  ⌫ delete  |  dbl-click rename  |  right-click more…
+Click select  |  ⌫ delete  |  dbl-click rename  |  right-click more…  |  Alt+drag edge = no snap
 ```
 
 CSS classes: `.edit-hint-bar`, `.edit-hint-bar__item`, `.edit-hint-bar__sep`.
@@ -301,12 +320,16 @@ clearSelection()     // clears ref + both states
 
 | Action | Result |
 |---|---|
-| **Plain click** a tile (not in a group) | Selects just that tile immediately |
+| **Plain click** a tile (not in a group) | Selects tile; sets `selectionRef` to tile's `[t0, t1]`; moves playhead to `t0` |
 | **Ctrl/Cmd+click** a tile | Toggles it into/out of the multi-selection; no drag starts |
 | **Plain click** a tile in a multi-selection | Keeps group, starts group drag |
 | **Plain click + no drag** on grouped tile | Collapses to single selection on mouseup (detected via `didDrag` flag) |
-| **Plain click** empty space | Clears entire selection |
+| **Plain click** empty space | Clears tile selection and `selectionRef` |
 | **Leave edit mode** | Clears entire selection |
+
+Clicking a tile sets `selectionRef.current = { t0: item.t0, t1: item.t1 }`. Play/Space then replays from `sel.t0` to `sel.t1`. Clicking empty space clears `selectionRef`; Play/Space resumes from `playheadRef.current`.
+
+**AUTO-PLAY checkbox** (right side of the SHOW bar): when enabled, clicking a tile immediately starts playback from its onset to offset without requiring a separate Play press.
 
 ### Visual feedback
 
@@ -323,10 +346,11 @@ clearSelection()     // clears ref + both states
 When dragging a tile that is part of a multi-selection (≥2 tiles):
 
 1. Snapshots all selected tiles' `origT0/origT1` grouped by tier at drag start
-2. Computes `minDt` / `maxDt` clamps so no tile crosses `0` or `duration`
-3. On each `mousemove`, applies the same `dt` to all selected tiles across all tiers
-4. Each affected tier canvas is redrawn independently during the drag
-5. On `mouseup` without drag (`didDrag === false`): collapses selection to just the clicked tile
+2. Computes `groupOrigT0` (leftmost t0) and `groupOrigT1` (rightmost t1) — treated as a single virtual tile for snapping
+3. Computes `minDt` / `maxDt` clamps so no tile crosses `0` or `duration`
+4. On each `mousemove`, snaps the group's leading/trailing edge to external boundaries, then applies the same `dt` to all selected tiles across all tiers
+5. Each affected tier canvas is redrawn independently during the drag
+6. On `mouseup` without drag (`didDrag === false`): collapses selection to just the clicked tile; sets `selectionRef` and moves playhead to that tile's onset
 
 Edge dragging is always single-tile only.
 
@@ -770,11 +794,20 @@ Notable component classes:
 
 - **The `spectroCacheRef` local cache has no `ph` equality check.** Python returns pixels at exactly the requested canvas dimensions, so the height always matches. The old JS worker path stored `ph` and checked it; that check has been removed.
 
+- **`src.onended` must be guarded by `gen !== playGenRef.current` before `!playingRef.current`.** Calling `src.stop()` always fires `onended` — even when stopping manually to start a new source. The generation check must come first; if stale, return immediately so the old source's `onended` cannot touch `playheadRef`, kill the new source, or call `setPlaying(false)`.
+
+- **`drawSnapGuide` must be called after `drawTier`** during edge/body drags, not before. `drawTier` clears and repaints the canvas; calling `drawSnapGuide` first would be immediately overwritten.
+
+- **`getAllTiers()` is the single source of truth for the tier list.** Do not build inline `[{ id: 'words', ... }, ...]` arrays elsewhere — use `getAllTiers()` so custom tiers are always included automatically.
+
+- **Snap boundaries exclude all tiers containing selected tiles.** For group drag, `draggedTierIds = new Set(origsByTier.keys())`. Tiers in this set are excluded from `crossBounds` and used only for `sameBounds` (unselected items within the dragged tier). This prevents a group of phonemes from snapping to its own boundaries as it moves.
+
+- **Play/Space always starts from `sel.t0` when a selection exists, or `playheadRef.current` when not.** `selectionRef` is set on tile click and cleared on empty-space click. The `to` endpoint is always `sel ? sel.t1 : duration` inside `startPlay`.
+
 ---
 
 ## Known Gaps
 
-- No cross-tier boundary snapping (phoneme edges to word edges)
 - No waveform-level edit (only tier tiles)
 - No multi-file batch processing
 - `buildMelSpectrogram` in `dsp.js` result is only used as a presence check; actual rendering goes through the worker cache

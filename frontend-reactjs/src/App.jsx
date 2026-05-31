@@ -592,6 +592,7 @@ export default function App() {
   const undoStackRef     = useRef([]); // snapshots: { words, phones, customTiers }
   const hoverEdgeRef     = useRef(null); // { id, tierId, side: 'left'|'right' } for cursor feedback
   const selectedTilesRef = useRef(new Map()); // id → { id, tierId } — multi-selected tiles in edit mode
+  const snapGuideRef     = useRef(null); // { t: number } | null — active snap target during edge drag
 
   // ── Canvas element refs ───────────────────────────────────────────────
   const waveCanvasRef    = useRef(null);
@@ -1035,6 +1036,42 @@ export default function App() {
     drawMinimap();
   }, [drawWave, drawSpec, drawFreqAxis, drawRuler, drawTier, drawMinimap]);
 
+  // Returns all tier items as { id, items } excluding the given set of tier ids
+  const getAllTiers = useCallback(() => [
+    { id: 'words',  items: wordsRef.current },
+    { id: 'phones', items: phonesRef.current },
+    ...customTiersRef.current.map(ct => ({ id: ct.id, items: ct.items })),
+  ], []);
+
+  const getCrossTierBoundaries = useCallback((excludeTierId) =>
+    getAllTiers()
+      .filter(t => t.id !== excludeTierId)
+      .flatMap(t => t.items.flatMap(it => [it.t0, it.t1]))
+  , [getAllTiers]);
+
+  const drawSnapGuide = useCallback(() => {
+    const sg = snapGuideRef.current;
+    if (!sg) return;
+    const canvases = [
+      waveCanvasRef.current,
+      specCanvasRef.current,
+      wordsCanvasRef.current,
+      phonesCanvasRef.current,
+      ...Object.values(customCanvasRefs.current),
+    ].filter(Boolean);
+    for (const cv of canvases) {
+      const { ctx, w, h } = setupCanvas(cv);
+      const x = tX(sg.t, w);
+      ctx.save();
+      ctx.strokeStyle = 'rgba(255, 220, 80, 0.85)';
+      ctx.lineWidth = 1;
+      ctx.setLineDash([4, 3]);
+      ctx.beginPath(); ctx.moveTo(x + 0.5, 0); ctx.lineTo(x + 0.5, h);
+      ctx.stroke();
+      ctx.restore();
+    }
+  }, [tX]);
+
   // ── Spectrogram computation ───────────────────────────────────────────
 
   const calcBaseSpec = useCallback((buf) => {
@@ -1163,6 +1200,7 @@ export default function App() {
   }, []);
 
   const stopPlay = useCallback(() => {
+    console.log('[stopPlay] playhead=', playheadRef.current.toFixed(3), 'playingRef=', playingRef.current);
     stopAudio();
     setPlaying(false);
     clearOverlay();
@@ -1206,6 +1244,7 @@ export default function App() {
 
   const startPlay = useCallback((from) => {
     if (!audioBufferRef.current) return;
+    console.log('[startPlay] from=', from.toFixed(3), 'sel=', selectionRef.current ? `${selectionRef.current.t0.toFixed(3)}-${selectionRef.current.t1.toFixed(3)}` : 'null');
     stopAudio();
     const ctx = getAudioCtx();
     const doStart = () => {
@@ -1216,6 +1255,7 @@ export default function App() {
       src.playbackRate.value = rate;
       const sel = selectionRef.current;
       const to = sel ? sel.t1 : durationRef.current;
+      console.log('[doStart] from=', from.toFixed(3), 'to=', to.toFixed(3), 'dur=', (to - from).toFixed(3), 'sel=', sel ? `${sel.t0.toFixed(3)}-${sel.t1.toFixed(3)}` : 'null');
       // Increment generation before setting timing refs so any in-flight RAF
       // tick from a previous play chain self-cancels immediately.
       const gen = ++playGenRef.current;
@@ -1243,10 +1283,14 @@ export default function App() {
       src.start(0, from);
       src.stop(nextQuantumCtx + audioDur);
       src.onended = () => {
-        // Pin the bar to the exact end before doing anything else.
-        // onended fires before tick ever reaches playEndAtRef (the RAF
-        // fires at 60 Hz but onended fires at the exact audio sample),
-        // so the last tick frame left the bar short. Force it to the end.
+        console.log('[onended] gen=', gen, 'current=', playGenRef.current, 'playingRef=', playingRef.current, 'playhead=', playheadRef.current.toFixed(3), 'playEndAt=', playEndAtRef.current.toFixed(3));
+        // Stale source — a new startPlay has already taken over.
+        if (gen !== playGenRef.current) return;
+        // If playingRef is already false, stopAudio() was called manually (pause).
+        // Don't pin the playhead to the end — leave it where the user paused.
+        if (!playingRef.current) return;
+        // Pin the bar to the exact end — onended fires before the RAF tick
+        // reaches playEndAtRef, so the last frame left the bar short.
         playheadRef.current = playEndAtRef.current;
         updateTimeDisplay();
         drawOverlay();
@@ -1607,6 +1651,7 @@ export default function App() {
               xT(Math.max(0, Math.min(rect.width, ev.clientX - rect.left)), rect.width)));
             playheadRef.current = t;
             updateTimeDisplay();
+            console.log('[seek] click at t=', t.toFixed(3), 'playing=', playingRef.current, 'sel=', selectionRef.current);
             if (playingRef.current) { stopPlay(); startPlay(t); } else redraw();
           }
         };
@@ -1901,7 +1946,32 @@ export default function App() {
         const onMove = (ev) => {
           const dx = ev.clientX - startX;
           const dt = (dx / rect.width) * (viewRef.current.t1 - viewRef.current.t0);
-          const newT = Math.max(minT, Math.min(maxT, startT + dt));
+          let newT = Math.max(minT, Math.min(maxT, startT + dt));
+
+          // Magnetic snap to cross-tier + same-tier boundaries (Alt to disable)
+          const SNAP_PX = 10;
+          const snapThreshT = (SNAP_PX / rect.width) * (viewRef.current.t1 - viewRef.current.t0);
+          if (!ev.altKey) {
+            const crossBounds = getCrossTierBoundaries(tierId);
+            const sameBounds = itemsRef.current
+              .filter(it => it.id !== item.id && (neighbour ? it.id !== neighbour.id : true))
+              .flatMap(it => [it.t0, it.t1]);
+            const allBounds = [...crossBounds, ...sameBounds];
+            let best = null, bestD = snapThreshT;
+            for (const bt of allBounds) {
+              const d = Math.abs(newT - bt);
+              if (d < bestD) { bestD = d; best = bt; }
+            }
+            if (best !== null) {
+              newT = Math.max(minT, Math.min(maxT, best));
+              snapGuideRef.current = { t: newT };
+            } else {
+              snapGuideRef.current = null;
+            }
+          } else {
+            snapGuideRef.current = null;
+          }
+
           const updated = itemsRef.current.map(it => {
             if (it.id === item.id) return { ...it, [side === 'left' ? 't0' : 't1']: newT };
             if (neighbour && it.id === neighbour.id) return { ...it, [side === 'left' ? 't1' : 't0']: newT };
@@ -1909,11 +1979,14 @@ export default function App() {
           });
           commitItems(updated);
           drawTier(canvas, updated, isWord);
+          drawSnapGuide();
         };
         const onUp = () => {
           window.removeEventListener('mousemove', onMove);
           window.removeEventListener('mouseup', onUp);
           canvas.style.cursor = 'ew-resize';
+          snapGuideRef.current = null;
+          redraw();
         };
         canvas.style.cursor = 'ew-resize';
         window.addEventListener('mousemove', onMove);
@@ -1941,11 +2014,51 @@ export default function App() {
           const minDt = -Math.min(...allOrig.map(o => o.origT0));
           const maxDt =  Math.min(...allOrig.map(o => DUR - o.origT1));
 
+          // Treat the group as a single virtual tile: leftmost t0, rightmost t1
+          const selectedIds = new Set(allOrig.map(o => o.id));
+          const groupOrigT0 = Math.min(...allOrig.map(o => o.origT0));
+          const groupOrigT1 = Math.max(...allOrig.map(o => o.origT1));
+
           const onMove = (ev) => {
             didDrag = true;
             const dx = ev.clientX - startX;
-            const dt = Math.max(minDt, Math.min(maxDt,
+            let dt = Math.max(minDt, Math.min(maxDt,
               (dx / rect.width) * (viewRef.current.t1 - viewRef.current.t0)));
+
+            // Snap group's leading/trailing edge — same logic as single tile body drag
+            if (!ev.altKey) {
+              const SNAP_PX = 10;
+              const snapThreshT = (SNAP_PX / rect.width) * (viewRef.current.t1 - viewRef.current.t0);
+              // Only snap to tiers that have NO selected tiles; within dragged tiers snap to unselected neighbours
+              const draggedTierIds = new Set(origsByTier.keys());
+              const tiers = getAllTiers();
+              const crossBounds = tiers
+                .filter(t => !draggedTierIds.has(t.id))
+                .flatMap(t => t.items.flatMap(it => [it.t0, it.t1]));
+              const sameBounds = tiers
+                .filter(t => draggedTierIds.has(t.id))
+                .flatMap(t => t.items.filter(it => !selectedIds.has(it.id)).flatMap(it => [it.t0, it.t1]));
+              const allBounds = [...crossBounds, ...sameBounds];
+              const newGroupT0 = groupOrigT0 + dt;
+              const newGroupT1 = groupOrigT1 + dt;
+              let best = null, bestD = snapThreshT, bestEdge = 't0';
+              for (const bt of allBounds) {
+                const d0 = Math.abs(newGroupT0 - bt);
+                const d1 = Math.abs(newGroupT1 - bt);
+                if (d0 < bestD) { bestD = d0; best = bt; bestEdge = 't0'; }
+                if (d1 < bestD) { bestD = d1; best = bt; bestEdge = 't1'; }
+              }
+              if (best !== null) {
+                const snappedDt = bestEdge === 't0' ? best - groupOrigT0 : best - groupOrigT1;
+                dt = Math.max(minDt, Math.min(maxDt, snappedDt));
+                snapGuideRef.current = { t: best };
+              } else {
+                snapGuideRef.current = null;
+              }
+            } else {
+              snapGuideRef.current = null;
+            }
+
             for (const [dragTierId, origList] of origsByTier) {
               const tItemsRef = dragTierId === 'words'  ? wordsRef
                               : dragTierId === 'phones' ? phonesRef
@@ -1965,11 +2078,13 @@ export default function App() {
                        : customCanvasRefs.current[dragTierId];
               if (cv) drawTier(cv, withRows, dragTierId === 'words');
             }
+            drawSnapGuide();
           };
           const onUp = () => {
             window.removeEventListener('mousemove', onMove);
             window.removeEventListener('mouseup', onUp);
             canvas.style.cursor = 'grab';
+            snapGuideRef.current = null;
             if (!didDrag) {
               // Plain click (no drag) on a grouped tile → collapse to just this tile
               selectedTilesRef.current.clear();
@@ -1978,9 +2093,9 @@ export default function App() {
               selectionRef.current = { t0: item.t0, t1: item.t1 };
               playheadRef.current = item.t0;
               updateTimeDisplay();
-              redraw();
               if (autoPlayTileRef.current) { stopPlay(); startPlay(item.t0); }
             }
+            redraw();
           };
           canvas.style.cursor = 'grabbing';
           window.addEventListener('mousemove', onMove);
@@ -1995,18 +2110,51 @@ export default function App() {
             didDrag = true;
             const dx = ev.clientX - startX;
             const dt = (dx / rect.width) * (viewRef.current.t1 - viewRef.current.t0);
-            const newT0 = Math.max(0, Math.min(DUR - width, origT0 + dt));
+            let newT0 = Math.max(0, Math.min(DUR - width, origT0 + dt));
+
+            // Snap t0 or t1 to any boundary (cross-tier + same-tier neighbours), whichever is closer
+            if (!ev.altKey) {
+              const SNAP_PX = 10;
+              const snapThreshT = (SNAP_PX / rect.width) * (viewRef.current.t1 - viewRef.current.t0);
+              const crossBounds = getCrossTierBoundaries(tierId);
+              const sameBounds = itemsRef.current
+                .filter(it => it.id !== item.id)
+                .flatMap(it => [it.t0, it.t1]);
+              const allBounds = [...crossBounds, ...sameBounds];
+              const newT1 = newT0 + width;
+              let best = null, bestD = snapThreshT, bestEdge = 't0';
+              for (const bt of allBounds) {
+                const d0 = Math.abs(newT0 - bt);
+                const d1 = Math.abs(newT1 - bt);
+                if (d0 < bestD) { bestD = d0; best = bt; bestEdge = 't0'; }
+                if (d1 < bestD) { bestD = d1; best = bt; bestEdge = 't1'; }
+              }
+              if (best !== null) {
+                newT0 = bestEdge === 't0'
+                  ? Math.max(0, Math.min(DUR - width, best))
+                  : Math.max(0, Math.min(DUR - width, best - width));
+                snapGuideRef.current = { t: best };
+              } else {
+                snapGuideRef.current = null;
+              }
+            } else {
+              snapGuideRef.current = null;
+            }
+
             const updated = itemsRef.current.map(it =>
               it.id === item.id ? { ...it, t0: newT0, t1: newT0 + width } : it
             );
             const withRows = assignRows(updated);
             commitItems(withRows);
             drawTier(canvas, withRows, isWord);
+            drawSnapGuide();
           };
           const onUp = () => {
             window.removeEventListener('mousemove', onMove);
             window.removeEventListener('mouseup', onUp);
             canvas.style.cursor = 'grab';
+            snapGuideRef.current = null;
+            redraw();
           };
           canvas.style.cursor = 'grabbing';
           window.addEventListener('mousemove', onMove);
@@ -2089,7 +2237,7 @@ export default function App() {
       canvas.removeEventListener('mousedown', onMouseDown);
       canvas.removeEventListener('contextmenu', onContextMenu);
     };
-  }, [hitTest, tX, xT, drawTier, redraw, pushUndo, commitTierItems, clearSelection, syncSelectionState, stopPlay, startPlay, updateTimeDisplay]);
+  }, [hitTest, tX, xT, drawTier, redraw, pushUndo, commitTierItems, clearSelection, syncSelectionState, stopPlay, startPlay, updateTimeDisplay, getCrossTierBoundaries, getAllTiers, drawSnapGuide]);
 
   useEffect(() => {
     const c1 = addTierEditInteraction(wordsCanvasRef.current,  wordsRef,  true,  'words');
@@ -2954,6 +3102,10 @@ export default function App() {
             <span className="edit-hint-bar__sep" />
             <span className="edit-hint-bar__item">
               <kbd>drag empty</kbd> set loop
+            </span>
+            <span className="edit-hint-bar__sep" />
+            <span className="edit-hint-bar__item">
+              <kbd>Alt</kbd>+drag edge = no snap
             </span>
           </div>
         )}
