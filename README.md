@@ -11,10 +11,14 @@ The full workflow is:
 ## Prerequisites
 
 - **conda** — [Miniconda](https://docs.conda.io/en/latest/miniconda.html) or Anaconda
-- **Node.js v18+** — easiest via [nvm](https://github.com/nvm-sh/nvm):
+- **Node.js v18+** — on macOS, easiest via [Homebrew](https://brew.sh):
+  ```bash
+  brew install node@20
+  ```
+  Or via [nvm](https://github.com/nvm-sh/nvm) (cross-platform):
   ```bash
   curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
-  # restart terminal, then:
+  # then in a new terminal:
   nvm install 20 && nvm use 20
   ```
 
