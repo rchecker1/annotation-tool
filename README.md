@@ -13,7 +13,7 @@ The full workflow is:
 - **conda** — [Miniconda](https://docs.conda.io/en/latest/miniconda.html) or Anaconda
 - **Node.js v18+** — on macOS, easiest via [Homebrew](https://brew.sh):
   ```bash
-  brew install node@20
+  brew install node
   ```
   Or via [nvm](https://github.com/nvm-sh/nvm) (cross-platform):
   ```bash
