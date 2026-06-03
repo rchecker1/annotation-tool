@@ -397,6 +397,66 @@ function TierNamePopover({ onAdd, onClose }) {
   );
 }
 
+function FilePicker({ wavs, tgs, onSelect }) {
+  const [selWav, setSelWav] = useState(wavs[0]);
+  const [selTg,  setSelTg]  = useState(tgs[0] || '');
+
+  const labelStyle = { fontSize: 11, color: '#9a9890', marginBottom: 4 };
+  const selectStyle = {
+    width: '100%', padding: '6px 8px', borderRadius: 6,
+    background: '#18181c', border: '1px solid #2a2a30',
+    color: '#e8e6e1', fontSize: 13,
+    fontFamily: "'JetBrains Mono', monospace",
+  };
+
+  return (
+    <div style={{
+      position: 'fixed', inset: 0, zIndex: 9999,
+      background: 'rgba(0,0,0,0.75)', backdropFilter: 'blur(4px)',
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+    }}>
+      <div style={{
+        background: '#13131a', border: '1px solid #2a2a30', borderRadius: 12,
+        padding: '28px 32px', minWidth: 380, maxWidth: 480,
+        display: 'flex', flexDirection: 'column', gap: 20,
+      }}>
+        <div style={{ fontSize: 15, fontWeight: 600, color: '#e8e6e1' }}>
+          Select files to load
+        </div>
+        <div style={{ fontSize: 12, color: '#9a9890' }}>
+          Multiple files found in <code style={{ color: '#7aacf0' }}>public/</code>. Pick one pair to open.
+        </div>
+
+        <div>
+          <div style={labelStyle}>Audio (.wav)</div>
+          <select value={selWav} onChange={e => setSelWav(e.target.value)} style={selectStyle}>
+            {wavs.map(w => <option key={w} value={w}>{w}</option>)}
+          </select>
+        </div>
+
+        <div>
+          <div style={labelStyle}>TextGrid</div>
+          <select value={selTg} onChange={e => setSelTg(e.target.value)} style={selectStyle}>
+            <option value=''>— none —</option>
+            {tgs.map(t => <option key={t} value={t}>{t}</option>)}
+          </select>
+        </div>
+
+        <button
+          onClick={() => onSelect(selWav, selTg || null)}
+          style={{
+            marginTop: 4, padding: '8px 0', borderRadius: 7,
+            background: '#3a7bd5', border: 'none', color: '#fff',
+            fontSize: 13, fontWeight: 600, cursor: 'pointer',
+          }}
+        >
+          Open
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function ConfidenceDashboard({ words }) {
   const scored = words.filter(w => w.score != null).sort((a, b) => a.score - b.score);
   if (scored.length === 0) {
@@ -525,6 +585,8 @@ export default function App() {
   const [mfaWordPicker, setMfaWordPicker] = useState(null);   // { words: WordItem[], sel } | null
   const [mfaQueueOpen, setMfaQueueOpen]   = useState(false);  // dropdown visible
   const [setupError, setSetupError]       = useState(null);   // string | null — shown before audio loads
+  const [memoryWarning, setMemoryWarning] = useState(false);  // shown for audio > 30 min
+  const [filePicker, setFilePicker]       = useState(null);   // { wavs, tgs } | null — shown when multiple files detected
   const [customTiers, setCustomTiers]     = useState([]);     // { id, name, visible, items }
   const [wordsVisible, setWordsVisible]   = useState(true);
   const [phonesVisible, setPhonesVisible] = useState(true);
@@ -799,31 +861,39 @@ export default function App() {
     const { t0, t1 } = viewRef.current;
     ctx.fillStyle = '#090910'; ctx.fillRect(0, 0, w, h);
     const sp = spectroRef.current;
-    if (sp) {
-      const dpr = window.devicePixelRatio || 1;
-      const pw = Math.round(w * dpr);
-      const ph = Math.round(h * dpr);
+    const dpr = window.devicePixelRatio || 1;
+    const pw = Math.round(w * dpr);
+    const ph = Math.round(h * dpr);
 
-      const blitStrip = (cache) => {
-        const { canvas: strip, stripT0, stripT1, stripPw } = cache;
-        const totalSpan = stripT1 - stripT0;
-        const span = t1 - t0;
-        const srcX = Math.round(((t0 - stripT0) / totalSpan) * stripPw);
-        const srcW = Math.round((span / totalSpan) * stripPw);
-        ctx.save();
-        ctx.setTransform(1, 0, 0, 1, 0, 0);
-        ctx.drawImage(strip, Math.max(0, srcX), 0, Math.max(1, srcW), ph, 0, 0, pw, ph);
-        ctx.restore();
-      };
+    const blitStrip = (cache) => {
+      const { canvas: strip, stripT0, stripT1, stripPw } = cache;
+      const totalSpan = stripT1 - stripT0;
+      const span = t1 - t0;
+      const srcX = Math.round(((t0 - stripT0) / totalSpan) * stripPw);
+      const srcW = Math.round((span / totalSpan) * stripPw);
+      ctx.save();
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.drawImage(strip, Math.max(0, srcX), 0, Math.max(1, srcW), ph, 0, 0, pw, ph);
+      ctx.restore();
+    };
 
-      const local = spectroCacheRef.current;
-      const base  = baseSpecCacheRef.current;
-      if (local.canvas && local.stripT0 <= t0 && local.stripT1 >= t1) {
-        blitStrip(local);
-      } else if (base.canvas && base.stripT0 <= t0 && base.stripT1 >= t1) {
-        blitStrip(base);
-      }
+    const local = spectroCacheRef.current;
+    const base  = baseSpecCacheRef.current;
+
+    if (local.canvas && local.stripT0 <= t0 && local.stripT1 >= t1) {
+      blitStrip(local);
+    } else if (base.canvas && base.stripT0 <= t0 && base.stripT1 >= t1) {
+      blitStrip(base);
+    } else if (!sp) {
+      // No spectrogram data at all — show hint
+      ctx.fillStyle = '#3a3a4a';
+      ctx.font = '13px Inter,sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('Click "Enhance Spectrogram" to generate', w / 2, h / 2);
+      ctx.textAlign = 'left';
     }
+
     drawSelectionRect(ctx, w, h, 0.18);
     if (showFormantsRef.current) {
       const ft = formantTrackRef.current;
@@ -1355,11 +1425,18 @@ export default function App() {
     rmsEnvRef.current = buildRmsEnvelope(buffer);
     redraw();
 
+    if (buffer.duration > 1800) setMemoryWarning(true);
+
     setTimeout(() => {
-      spectroRef.current = buildMelSpectrogram(buffer, COLORMAPS[colormapNameRef.current] || inferno);
       spectroCacheRef.current = { canvas: null };
       baseSpecCacheRef.current = { canvas: null };
-      calcBaseSpec(buffer);
+      if (buffer.duration <= 600) {
+        spectroRef.current = buildMelSpectrogram(buffer, COLORMAPS[colormapNameRef.current] || inferno);
+        calcBaseSpec(buffer);
+      } else {
+        spectroRef.current = null;
+        drawSpec();
+      }
     }, 50);
   }, [redraw, stopAudio]);
 
@@ -1425,6 +1502,25 @@ export default function App() {
     }
   }, []);
 
+  // ── Load a wav + optional textgrid from public/ by filename ──────────
+  const loadPublicPair = useCallback(async (wavName, tgName) => {
+    if (tgName) {
+      try {
+        tgFileNameRef.current = tgName.replace(/\.TextGrid$/i, '');
+        const res = await fetch(`/${encodeURIComponent(tgName)}`);
+        if (res.ok) loadTextGrid(await res.text());
+      } catch(e) { console.warn('TextGrid load failed:', e); }
+    }
+    try {
+      const res = await fetch(`/${encodeURIComponent(wavName)}`);
+      if (!res.ok) throw new Error(res.statusText);
+      await loadAudio(new File([await res.blob()], wavName, { type: 'audio/wav' }));
+      publicWavFileRef.current = wavName;
+      setAudioFileName(wavName.replace(/\.[^.]+$/, ''));
+      setSetupError(null);
+    } catch(e) { console.warn('Audio auto-load failed:', e); }
+  }, [loadAudio, loadTextGrid]);
+
   // ── Effects ───────────────────────────────────────────────────────────
 
   useEffect(() => {
@@ -1445,41 +1541,19 @@ export default function App() {
       if (wavs.length === 0) {
         setSetupError(
           'No WAV file found in public/.\n' +
-          'Add exactly one .wav and one .TextGrid file to the public/ folder, then reload.'
-        );
-        return;
-      }
-      if (wavs.length > 1) {
-        setSetupError(
-          `Found ${wavs.length} WAV files in public/: ${wavs.join(', ')}\n` +
-          'Keep exactly one .wav file in public/, then reload.'
-        );
-        return;
-      }
-      if (tgs.length > 1) {
-        setSetupError(
-          `Found ${tgs.length} TextGrid files in public/: ${tgs.join(', ')}\n` +
-          'Keep exactly one .TextGrid file in public/, then reload.'
+          'Add at least one .wav and one .TextGrid file to the public/ folder, then reload.'
         );
         return;
       }
 
-      // Exactly one WAV (and zero or one TextGrid) — auto-load
-      if (tgs.length === 1) {
-        try {
-          tgFileNameRef.current = tgs[0].replace(/\.TextGrid$/i, '');
-          const res = await fetch(`/${encodeURIComponent(tgs[0])}`);
-          if (res.ok) loadTextGrid(await res.text());
-        } catch(e) { console.warn('TextGrid load failed:', e); }
+      // Multiple files — show picker instead of auto-loading
+      if (wavs.length > 1 || tgs.length > 1) {
+        setFilePicker({ wavs, tgs });
+        return;
       }
-      try {
-        const res = await fetch(`/${encodeURIComponent(wavs[0])}`);
-        if (!res.ok) throw new Error(res.statusText);
-        await loadAudio(new File([await res.blob()], wavs[0], { type: 'audio/wav' }));
-        publicWavFileRef.current = wavs[0];
-        setAudioFileName(wavs[0].replace(/\.[^.]+$/, ''));
-        setSetupError(null);
-      } catch(e) { console.warn('Audio auto-load failed:', e); }
+
+      // Exactly one WAV (and zero or one TextGrid) — auto-load
+      await loadPublicPair(wavs[0], tgs[0] || null);
     })();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -1795,6 +1869,21 @@ export default function App() {
       if (e.button === 2) return;
       if (!editModeRef.current) {
         const rect = canvas.getBoundingClientRect();
+        const hit = hitTest(canvas, itemsRef.current, e.clientX, e.clientY);
+        if (hit) {
+          // Select tile and set play region without needing edit mode
+          const { item } = hit;
+          selectedTilesRef.current.clear();
+          selectedTilesRef.current.set(item.id, { id: item.id, tierId });
+          syncSelectionState();
+          selectionRef.current = { t0: item.t0, t1: item.t1 };
+          playheadRef.current = item.t0;
+          updateTimeDisplay();
+          redraw();
+          if (autoPlayTileRef.current) { stopPlay(); startPlay(item.t0); }
+          return;
+        }
+        // Click on empty space — loop-selection drag or seek
         const startT = xT(e.clientX - rect.left, rect.width);
         let dragged = false;
         selectionRef.current = { t0: startT, t1: startT };
@@ -1809,6 +1898,7 @@ export default function App() {
           window.removeEventListener('mousemove', onMove);
           window.removeEventListener('mouseup', onUp);
           if (!dragged) {
+            clearSelection();
             selectionRef.current = null;
             const t = Math.max(0, Math.min(durationRef.current,
               xT(Math.max(0, Math.min(rect.width, ev.clientX - rect.left)), rect.width)));
@@ -2308,11 +2398,15 @@ export default function App() {
     colormapNameRef.current = name; setColormapName(name);
     const buf = audioBufferRef.current;
     if (!buf) return;
-    spectroRef.current = buildMelSpectrogram(buf, COLORMAPS[name] || inferno);
     spectroCacheRef.current = { canvas: null };
     baseSpecCacheRef.current = { canvas: null };
-    calcBaseSpec(buf);
-  }, [calcBaseSpec]);
+    if (buf.duration <= 600) {
+      spectroRef.current = buildMelSpectrogram(buf, COLORMAPS[name] || inferno);
+      calcBaseSpec(buf);
+    } else {
+      drawSpec();
+    }
+  }, [calcBaseSpec, drawSpec]);
 
   const handleAudioFile = (e) => { if (e.target.files[0]) loadAudio(e.target.files[0]); };
   const handleTGFile    = (e) => {
@@ -2597,6 +2691,37 @@ export default function App() {
           }}>
             annotation_tool/code/frontend-reactjs/public/
           </div>
+        </div>
+      )}
+
+      {/* File picker modal — shown when multiple wav/TextGrid files are in public/ */}
+      {filePicker && (
+        <FilePicker
+          wavs={filePicker.wavs}
+          tgs={filePicker.tgs}
+          onSelect={async (wav, tg) => {
+            setFilePicker(null);
+            await loadPublicPair(wav, tg);
+          }}
+        />
+      )}
+
+      {/* Memory warning banner for long audio */}
+      {memoryWarning && (
+        <div style={{
+          position: 'fixed', top: 0, left: 0, right: 0, zIndex: 9000,
+          background: '#2a1a08', borderBottom: '1px solid #a07020',
+          color: '#f0b840', fontSize: 12, padding: '7px 16px',
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12,
+        }}>
+          <span>
+            ⚠ Audio is over 30 minutes — the browser holds the full decoded file in memory.
+            Save frequently with <kbd style={{ background: '#3a2a10', padding: '1px 5px', borderRadius: 3, border: '1px solid #a07020' }}>Ctrl/Cmd+S</kbd> to avoid losing work if the tab runs out of memory.
+          </span>
+          <button
+            onClick={() => setMemoryWarning(false)}
+            style={{ background: 'none', border: 'none', color: '#f0b840', cursor: 'pointer', fontSize: 14, lineHeight: 1, padding: '0 4px' }}
+          >✕</button>
         </div>
       )}
 

@@ -1,4 +1,4 @@
-# glistener
+# asr
 
 Audio → TextGrid pipeline. Takes any audio file, runs ASR to get word-level timestamps and confidence scores, then runs Montreal Forced Aligner (MFA) to get phoneme-level intervals, and writes a Praat TextGrid.
 
@@ -46,8 +46,8 @@ conda run -n aligner mfa model download acoustic english_mfa
 Create the ASR envs from the exported specs in this repo:
 
 ```bash
-conda env create -f glistener/environment-whisperx.yml   # env name: whisperx
-conda env create -f glistener/environment-parakeet.yml   # env name: nemo (Parakeet)
+conda env create -f asr/environment-whisperx.yml   # env name: whisperx
+conda env create -f asr/environment-parakeet.yml   # env name: nemo (Parakeet)
 ```
 
 Key packages:
@@ -58,20 +58,30 @@ The `aligner` env (MFA) is separate — install `montreal-forced-aligner` and `t
 
 ## Usage
 
-Run from the repo root (`/home/alisartazkhan`):
+Run from the repo root (the `annotation-tool/` directory after cloning):
 
 ```bash
 # WhisperX
-conda run -n whisperx python glistener/transcribe.py \
+conda run -n whisperx python asr/transcribe.py \
     --model whisper_asr \
     --audio  /path/to/audio.wav \
-    --output /path/to/output.TextGrid
+    --output frontend-reactjs/public/output_whisper.TextGrid
 
-# Parakeet
-conda run -n nemo python glistener/transcribe.py \
+# Parakeet (Linux + NVIDIA GPU only)
+conda run -n nemo python asr/transcribe.py \
     --model parakeet \
     --audio  /path/to/audio.wav \
-    --output /path/to/output.TextGrid
+    --output frontend-reactjs/public/output_whisper.TextGrid
+```
+
+Setting `--output` directly to `frontend-reactjs/public/` means the TextGrid is ready to load as soon as transcription finishes.
+
+### Changing the Whisper model size
+
+The default checkpoint is `tiny.en` (fast, less accurate). To use a more accurate model, edit line 32 of `asr/models/whisper_asr.py`:
+
+```python
+_CHECKPOINT = "tiny.en"   # change to e.g. "base.en", "small.en", "large-v3-turbo"
 ```
 
 ### All flags
@@ -96,7 +106,7 @@ Both models handle arbitrary-length audio without any extra flags:
 
 ## Adding a new ASR model
 
-### 1. Create `glistener/models/your_model.py`
+### 1. Create `asr/models/your_model.py`
 
 Implement a class with two methods — `setup()` and `transcribe()`:
 
@@ -168,7 +178,7 @@ Add an `elif` branch in `_load_model()`:
 ```python
 elif name == "your_model":
     try:
-        from glistener.models.your_model import YourModel
+        from asr.models.your_model import YourModel
     except ImportError:
         from models.your_model import YourModel
     m = YourModel()
@@ -187,7 +197,7 @@ ap.add_argument("--model", required=True,
 ### 3. Run it
 
 ```bash
-conda run -n your_env python glistener/transcribe.py \
+conda run -n your_env python asr/transcribe.py \
     --model your_model \
     --audio  /path/to/audio.wav \
     --output /path/to/output.TextGrid
@@ -200,7 +210,7 @@ MFA alignment and TextGrid writing happen automatically — no changes needed to
 ## File structure
 
 ```
-glistener/
+asr/
 ├── environment-whisperx.yml  — conda spec for WhisperX (env: whisperx)
 ├── environment-parakeet.yml  — conda spec for Parakeet (env: nemo)
 ├── transcribe.py        — entry point: parses args, calls model → aligner → writer

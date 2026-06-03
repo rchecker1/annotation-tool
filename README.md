@@ -41,7 +41,32 @@ This creates the necessary conda environments (`aligner`, `whisperx`, and `nemo`
 
 ---
 
+## Transcribing your own audio
+
+To generate a TextGrid from your own audio file, run the ASR pipeline from the `annotation-tool/` directory:
+
+```bash
+conda run -n whisperx python asr/transcribe.py \
+    --model whisper_asr \
+    --audio  /path/to/your/audio.wav \
+    --output frontend-reactjs/public/output_whisper.TextGrid
+```
+
+This transcribes the audio, runs MFA forced alignment, and writes the TextGrid directly into `public/` ready to load.
+
+**Changing the Whisper model size** — by default WhisperX uses `tiny.en` (fast, less accurate). To use a larger model, edit line 32 of `asr/models/whisper_asr.py`:
+
+```python
+_CHECKPOINT = "tiny.en"   # change to e.g. "base.en", "small.en", "large-v3-turbo"
+```
+
+Larger models are more accurate but slower. See the [WhisperX docs](https://github.com/m-bain/whisperX) for all available checkpoints.
+
+---
+
 ## Loading files
+
+> **Important:** `public/` must contain exactly **one** `.wav` file and **one** `.TextGrid` file at a time. The app will warn if the folder is empty, has more than one of either, or if the files are mismatched. Remove or rename old files before adding new ones.
 
 Copy your audio and TextGrid into the frontend's `public/` folder:
 
