@@ -18,9 +18,12 @@ npm run build      # production output → dist/
 
 `setup.sh` creates three conda environments (`aligner`, `whisperx`, `nemo`), downloads the MFA English US ARPAbet models, and installs frontend Node dependencies.
 
-On startup the app scans `public/` via a Vite dev-server middleware (`/api/public-files`) and auto-loads the first `.wav` + `.TextGrid` pair it finds. Drop your own files onto the page, or use the Load buttons in the toolbar.
+On startup the app scans `public/` via a Vite dev-server middleware (`/api/public-files`):
+- **Exactly one `.wav` + one `.TextGrid`** — auto-loaded immediately.
+- **Multiple `.wav` or `.TextGrid` files** — a `FilePicker` modal appears; the user selects which pair to open.
+- **No `.wav`** — a setup error screen is shown.
 
-Place files in `public/` — the app enforces exactly one `.wav` and one `.TextGrid` at startup and warns if the folder is empty or mismatched.
+Drop your own files onto the page, or use the Load buttons in the toolbar to load files at any time.
 
 IPA key layout is read from `public/ipa_keys.json` — a JSON object mapping IPA symbol strings to example-word strings (with `**bold**` markup for the key sound). Edit that file to add/remove keys from the virtual keyboard.
 
@@ -318,14 +321,16 @@ clearSelection()     // clears ref + both states
 
 ### Selection behaviour
 
-| Action | Result |
-|---|---|
-| **Plain click** a tile (not in a group) | Selects tile; sets `selectionRef` to tile's `[t0, t1]`; moves playhead to `t0` |
-| **Ctrl/Cmd+click** a tile | Toggles it into/out of the multi-selection; no drag starts |
-| **Plain click** a tile in a multi-selection | Keeps group, starts group drag |
-| **Plain click + no drag** on grouped tile | Collapses to single selection on mouseup (detected via `didDrag` flag) |
-| **Plain click** empty space | Clears tile selection and `selectionRef` |
-| **Leave edit mode** | Clears entire selection |
+Tile selection works in **both edit and non-edit mode**. In non-edit mode clicking a tile selects it and sets the play region — drag, rename, delete, and multi-select are edit-mode only.
+
+| Action | Mode | Result |
+|---|---|---|
+| **Plain click** a tile (not in a group) | Either | Selects tile; sets `selectionRef` to tile's `[t0, t1]`; moves playhead to `t0` |
+| **Plain click** empty space | Either | Clears tile selection and `selectionRef`; seeks playhead |
+| **Ctrl/Cmd+click** a tile | Edit only | Toggles it into/out of the multi-selection; no drag starts |
+| **Plain click** a tile in a multi-selection | Edit only | Keeps group, starts group drag |
+| **Plain click + no drag** on grouped tile | Edit only | Collapses to single selection on mouseup (detected via `didDrag` flag) |
+| **Leave edit mode** | — | Clears entire selection |
 
 Clicking a tile sets `selectionRef.current = { t0: item.t0, t1: item.t1 }`. Play/Space then replays from `sel.t0` to `sel.t1`. Clicking empty space clears `selectionRef`; Play/Space resumes from `playheadRef.current`.
 
@@ -536,16 +541,18 @@ Two-level cache:
 
 | Cache | Ref | Coverage | How computed |
 |---|---|---|---|
-| Base | `baseSpecCacheRef` | Full audio duration | `calcBaseSpec` — JS worker (`specWorker.js`), N_FFT=2048, hop=512. Runs once on load. |
+| Base | `baseSpecCacheRef` | Full audio duration | `calcBaseSpec` — JS worker (`specWorker.js`), N_FFT=2048, hop=512. Skipped for audio > 10 min. |
 | Local | `spectroCacheRef` | Current view | `calcSpecForView` — Python/librosa via `/api/compute-dsp`. User-triggered via "Enhance Spectrogram" button. |
 
 ### Base spec (on load)
 
-`calcBaseSpec(buf)` is called from `loadAudio`. It uses the JS `specWorker.js` to produce a low-res strip covering the full duration. This renders immediately without a server round-trip and gives a usable overview before any Python computation.
+`calcBaseSpec(buf)` is called from `loadAudio` **only when `buf.duration <= 600` (10 min)**. For longer audio, `spectroRef.current` is left `null` and the base spec worker is not started — skipping the large memory allocation and main-thread blocking of passing the full `Float32Array` to the worker.
+
+When no spec data is available, `drawSpec` renders a grey hint text: *"Click 'Enhance Spectrogram' to generate"*.
 
 ### Enhanced spec (on demand)
 
-`calcSpecForView` POSTs to `/api/compute-dsp` with the current view's `t0`/`t1`, canvas pixel dimensions (`pw`/`ph`), mel bands, and FFT size. Python returns RGBA pixels at the exact canvas resolution — no interpolation mismatch. The result is stored in `spectroCacheRef` and replaces the base spec for the current view.
+`calcSpecForView` POSTs to `/api/compute-dsp` with the current view's `t0`/`t1`, canvas pixel dimensions (`pw`/`ph`), mel bands, and FFT size. Python returns RGBA pixels at the exact canvas resolution — no interpolation mismatch. The result is stored in `spectroCacheRef` and renders correctly regardless of whether the base spec was computed.
 
 Parameters are user-configurable via the ⚙ dropdown on the "Enhance Spectrogram" button:
 - `specNMelsRef` — mel bands (40 / 80 / 128 / 160), default 128
@@ -553,7 +560,11 @@ Parameters are user-configurable via the ⚙ dropdown on the "Enhance Spectrogra
 
 ### Cache hit check
 
-`drawSpec` blits `spectroCacheRef` when `local.stripT0 <= t0 && local.stripT1 >= t1` (no `ph` check — Python returns pixels at the exact requested dimensions so height always matches). Falls back to `baseSpecCacheRef` when the local cache doesn't cover the view.
+`drawSpec` blits `spectroCacheRef` when `local.stripT0 <= t0 && local.stripT1 >= t1` (no `ph` check — Python returns pixels at the exact requested dimensions so height always matches). Falls back to `baseSpecCacheRef` when the local cache doesn't cover the view. The blit logic is **outside** the `if (sp)` guard so it runs even when `spectroRef` is null (long audio case).
+
+### Long audio memory warning
+
+For audio over 30 minutes (`duration > 1800`), `loadAudio` sets `memoryWarning` state to `true`. A dismissable orange banner is shown at the top of the screen warning the user to save frequently. The decoded `AudioBuffer` is held in memory for the entire session (Web Audio API requirement) — there is no streaming path.
 
 ### `/api/compute-dsp` (Vite middleware)
 
@@ -804,11 +815,32 @@ Notable component classes:
 
 - **Play/Space always starts from `sel.t0` when a selection exists, or `playheadRef.current` when not.** `selectionRef` is set on tile click and cleared on empty-space click. The `to` endpoint is always `sel ? sel.t1 : duration` inside `startPlay`.
 
+- **Tile selection works in non-edit mode.** `addTierEditInteraction`'s `onMouseDown` hit-tests on every click, not just in edit mode. In non-edit mode a tile hit selects the tile and sets the play region, then returns — drag/rename/delete are gated inside the edit-mode branch.
+
+- **`spectroRef.current` may be `null` for long audio even after load.** Do not gate spectrogram rendering on `if (sp)` — the blit logic must check `spectroCacheRef` and `baseSpecCacheRef` independently so enhanced spec renders correctly without a base spec.
+
+- **`loadPublicPair(wavName, tgName)` is the shared load path** for both auto-load and `FilePicker`. Do not duplicate the fetch + `loadAudio` + `loadTextGrid` sequence elsewhere.
+
+---
+
+## File Picker (`FilePicker` component)
+
+When `/api/public-files` returns more than one `.wav` or `.TextGrid`, the app renders `<FilePicker>` instead of auto-loading.
+
+```jsx
+<FilePicker wavs={string[]} tgs={string[]} onSelect={(wav, tg) => void} />
+```
+
+- Two `<select>` dropdowns — one for wav, one for TextGrid (includes a "— none —" option).
+- On confirm calls `onSelect(wavName, tgName | null)` which calls `loadPublicPair`.
+- `loadPublicPair(wavName, tgName)` — `useCallback` that fetches both files from `public/`, calls `loadTextGrid` + `loadAudio`, and sets `publicWavFileRef` / `audioFileName`. This is also used by the single-file auto-load path.
+
 ---
 
 ## Known Gaps
 
 - No waveform-level edit (only tier tiles)
 - No multi-file batch processing
-- `buildMelSpectrogram` in `dsp.js` result is only used as a presence check; actual rendering goes through the worker cache
+- `buildMelSpectrogram` in `dsp.js` result is only used as a presence check for short audio; skipped entirely for audio > 10 min
 - `Ctrl/Cmd+S` save does not work in production builds (no server-side endpoint)
+- Browser holds full decoded `AudioBuffer` in memory for the entire session — no streaming path for long audio

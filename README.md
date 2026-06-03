@@ -66,8 +66,6 @@ Larger models are more accurate but slower. See the [WhisperX docs](https://gith
 
 ## Loading files
 
-> **Important:** `public/` must contain exactly **one** `.wav` file and **one** `.TextGrid` file at a time. The app will warn if the folder is empty, has more than one of either, or if the files are mismatched. Remove or rename old files before adding new ones.
-
 Copy your audio and TextGrid into the frontend's `public/` folder:
 
 ```
@@ -83,6 +81,8 @@ npm run dev
 ```
 
 Open **http://localhost:5173** — the audio and TextGrid load automatically.
+
+**Multiple files:** if `public/` contains more than one `.wav` or `.TextGrid`, a picker modal appears on startup letting you choose which pair to open.
 
 You can also load files at any time without restarting:
 - Click **📄 Load TextGrid** in the toolbar to load a new TextGrid
@@ -106,7 +106,8 @@ You can also load files at any time without restarting:
 | Fit full audio | `F` |
 | Reset to start | `Home` |
 | Seek | Click anywhere on the waveform, spectrogram, or ruler |
-| Play tile | Click a tile in edit mode (sets play region to onset→offset); press Play or Space |
+| Select tile | Click any tile (edit mode not required) — moves playhead to onset and sets play region |
+| Play tile | After selecting a tile, press `Space` or ▶ Play |
 | Auto-play tile | Enable AUTO-PLAY in the SHOW bar — clicking a tile starts playback immediately |
 
 ### Tiers
@@ -171,6 +172,8 @@ Controls appear stacked on the right side of the spectrogram tier:
 - **Generate Formants** — overlays F1/F2/F3 formant tracks computed by Praat's Burg algorithm (via `parselmouth`). Includes an on/off pill toggle to show or hide the overlay without recomputing.
 
 > **Note:** Enhance Spectrogram and Generate Formants require the `aligner` conda environment to be present (it is created by `setup.sh`). The Vite dev server (`npm run dev`) shells out to `dsp_server.py` in the `aligner` env for these features. They are not available in production builds.
+
+**Long audio (> 10 min):** the base spectrogram is not computed on load to avoid blocking the browser. The spectrogram area shows a placeholder — click **Enhance Spectrogram** to generate it for the current view. For audio over 30 minutes, a warning banner appears reminding you to save frequently (`Ctrl/Cmd+S`), as the browser holds the full decoded audio in memory.
 
 ---
 
