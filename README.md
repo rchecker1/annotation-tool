@@ -26,7 +26,7 @@ The full workflow is:
 
 ## One-time setup
 
-From the `code/` directory, run:
+From the `annotation-tool/` directory, run:
 
 ```bash
 bash setup.sh
