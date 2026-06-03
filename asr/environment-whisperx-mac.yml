@@ -17,4 +17,4 @@ dependencies:
       - pandas
       - scipy
       - transformers
-      - textgrids
+      - praat-textgrids==1.4.0
