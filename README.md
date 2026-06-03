@@ -181,9 +181,8 @@ INFO    Dictionary     : english_us_arpa
 The server loads the alignment model once (~16 s startup), then handles each request in 1–4 s.
 
 **To use it:**
-1. Enter Edit mode and select a time region covering one or more words in the WRD tier
-2. Click **⚙ Run MFA** — if multiple words overlap the selection you'll be asked to confirm which to align
-3. When the job completes, phone boundaries are merged into the PHN tier
+1. Click **⚙ Run MFA** — if multiple words overlap the selection you'll be asked to confirm which to align
+2. When the job completes, phone boundaries are merged into the PHN tier
 
 Up to 4 alignment jobs can be queued at once. A dropdown badge on the button shows queue status. If a word is out-of-vocabulary, the server automatically substitutes the closest dictionary match and shows an orange warning toast.
 
