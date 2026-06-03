@@ -86,7 +86,6 @@ Open **http://localhost:5173** — the audio and TextGrid load automatically.
 
 You can also load files at any time without restarting:
 - Click **📄 Load TextGrid** in the toolbar to load a new TextGrid
-- Click **🔊 Load Audio** in the toolbar to load a new audio file
 - **Drag and drop** a `.wav` or `.TextGrid` file anywhere on the page
 
 ---
