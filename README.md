@@ -9,6 +9,9 @@ The full workflow is:
 ---
 
 ## Demo
+- **Key Reminder**: you can press "1" to edit instead of manually clicking the edit button. That shortcut key can also be remapped to any other button:
+  
+  <img width="358" height="73" alt="image" src="https://github.com/user-attachments/assets/4ec3a556-5837-443e-9292-e9de6ed5cfbd" />
 
 <video src="https://github.com/user-attachments/assets/a6242a2a-df1b-4089-88d7-ecdb3a090055" controls width="100%"></video>
 
