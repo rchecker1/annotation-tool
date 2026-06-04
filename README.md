@@ -10,7 +10,7 @@ The full workflow is:
 
 ## Demo
 
-<video src="videos/fcp.mp4" controls width="100%"></video>
+<video src="https://github.com/user-attachments/assets/a6242a2a-df1b-4089-88d7-ecdb3a090055" controls width="100%"></video>
 
 ---
 ## Prerequisites
@@ -26,7 +26,7 @@ The full workflow is:
   # then in a new terminal:
   nvm install 20 && nvm use 20
   ```
-<video src="videos/nodejs_setup.mp4" controls width="100%"></video>
+<video src="https://github.com/user-attachments/assets/3cd4f80c-0bf1-4f35-bc85-58285864d78a" controls width="100%"></video>
 
 ---
 
@@ -45,7 +45,7 @@ This creates the necessary conda environments (`aligner`, `whisperx`, and `nemo`
 - `nemo` (Parakeet) is currently only supported on Linux with NVIDIA GPUs and will be skipped on macOS.
 - WhisperX on Mac will use CPU or MPS (Apple Silicon) for inference.
 
-<video src="videos/setup.mp4" controls width="100%"></video>
+<video src="https://github.com/user-attachments/assets/95f06d80-a8f9-44ae-863f-acd5c6cb02d6" controls width="100%"></video>
 
 ---
 
@@ -70,7 +70,7 @@ _CHECKPOINT = "tiny.en"   # change to e.g. "base.en", "small.en", "large-v3-turb
 
 Larger models are more accurate but slower. See the [WhisperX docs](https://github.com/m-bain/whisperX) for all available checkpoints.
 
-<video src="videos/asr.mp4" controls width="100%"></video>
+<video src="https://github.com/user-attachments/assets/1f9cb5c7-2829-4bd2-9c47-d2ca2fb4b183" controls width="100%"></video>
 
 ---
 
@@ -98,7 +98,7 @@ You can also load files at any time without restarting:
 - Click **📄 Load TextGrid** in the toolbar to load a new TextGrid
 - **Drag and drop** a `.wav` or `.TextGrid` file anywhere on the page
 
-<video src="videos/bootup.mp4" controls width="100%"></video>
+<video src="https://github.com/user-attachments/assets/642f285d-c20b-4bd4-8114-e0bb2c3ec80d" controls width="100%"></video>
 
 ---
 
