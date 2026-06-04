@@ -8,6 +8,11 @@ The full workflow is:
 
 ---
 
+## Demo
+
+<video src="videos/fcp.mp4" controls width="100%"></video>
+
+---
 ## Prerequisites
 
 - **conda** — [Miniconda](https://docs.conda.io/en/latest/miniconda.html) or Anaconda
@@ -21,6 +26,7 @@ The full workflow is:
   # then in a new terminal:
   nvm install 20 && nvm use 20
   ```
+<video src="videos/nodejs_setup.mp4" controls width="100%"></video>
 
 ---
 
@@ -38,6 +44,8 @@ This creates the necessary conda environments (`aligner`, `whisperx`, and `nemo`
 - `setup.sh` automatically detects macOS and installs a Mac-compatible `whisperx` environment.
 - `nemo` (Parakeet) is currently only supported on Linux with NVIDIA GPUs and will be skipped on macOS.
 - WhisperX on Mac will use CPU or MPS (Apple Silicon) for inference.
+
+<video src="videos/setup.mp4" controls width="100%"></video>
 
 ---
 
@@ -61,6 +69,8 @@ _CHECKPOINT = "tiny.en"   # change to e.g. "base.en", "small.en", "large-v3-turb
 ```
 
 Larger models are more accurate but slower. See the [WhisperX docs](https://github.com/m-bain/whisperX) for all available checkpoints.
+
+<video src="videos/asr.mp4" controls width="100%"></video>
 
 ---
 
@@ -87,6 +97,8 @@ Open **http://localhost:5173** — the audio and TextGrid load automatically.
 You can also load files at any time without restarting:
 - Click **📄 Load TextGrid** in the toolbar to load a new TextGrid
 - **Drag and drop** a `.wav` or `.TextGrid` file anywhere on the page
+
+<video src="videos/bootup.mp4" controls width="100%"></video>
 
 ---
 

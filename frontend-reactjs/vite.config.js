@@ -83,6 +83,13 @@ function publicFilesPlugin() {
 
 export default defineConfig({
   plugins: [react(), publicFilesPlugin()],
-  server: { port: 5173 },
+  server: {
+    port: 5173,
+    watch: {
+      ignored: ['**/vite.config.js'],
+      usePolling: false,
+      stabilityThreshold: 500,
+    },
+  },
   configFileDependencies: [],
 });
