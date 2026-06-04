@@ -84,4 +84,5 @@ function publicFilesPlugin() {
 export default defineConfig({
   plugins: [react(), publicFilesPlugin()],
   server: { port: 5173 },
+  configFileDependencies: [],
 });
