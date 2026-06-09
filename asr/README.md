@@ -58,13 +58,39 @@ The `aligner` env (MFA) is separate — install `montreal-forced-aligner` there.
 
 ## Usage
 
-ASR and MFA run in different conda environments, so the pipeline is two steps.
-Run both from the `annotation-tool/` directory.
+Run from the `annotation-tool/` directory.
 
 ### WhisperX
 
 ```bash
-# Step 1 — transcribe (whisperx env)
+bash asr/run_whisper.sh /path/to/audio.wav
+```
+
+Output: `frontend-reactjs/public/output_whisper.TextGrid`
+
+To use a custom output name:
+
+```bash
+bash asr/run_whisper.sh /path/to/audio.wav my_output
+# writes: frontend-reactjs/public/my_output.TextGrid
+```
+
+### Parakeet (Linux + NVIDIA GPU only)
+
+```bash
+bash asr/run_parakeet.sh /path/to/audio.wav
+```
+
+Output: `frontend-reactjs/public/output_parakeet.TextGrid`
+
+Both scripts handle transcription and MFA alignment automatically — the TextGrid is ready to load as soon as the script finishes.
+
+### Advanced: run steps manually
+
+The scripts run two conda envs in sequence. If you need more control (e.g. rerunning only the alignment step after editing the JSON):
+
+```bash
+# Step 1 — transcribe only (whisperx env)
 conda run -n whisperx python asr/transcribe.py \
     --model whisper_asr \
     --audio  /path/to/audio.wav \
@@ -77,31 +103,6 @@ conda run -n aligner python asr/transcribe.py \
     --audio     /path/to/audio.wav \
     --output    frontend-reactjs/public/output_whisper.TextGrid
 ```
-
-Or as a one-liner:
-
-```bash
-conda run -n whisperx python asr/transcribe.py --model whisper_asr --audio /path/to/audio.wav --output frontend-reactjs/public/output_whisper.TextGrid --no-mfa --json && conda run -n aligner python asr/transcribe.py --from-json frontend-reactjs/public/output_whisper.json --audio /path/to/audio.wav --output frontend-reactjs/public/output_whisper.TextGrid
-```
-
-### Parakeet (Linux + NVIDIA GPU only)
-
-```bash
-# Step 1 — transcribe (nemo env)
-conda run -n nemo python asr/transcribe.py \
-    --model parakeet \
-    --audio  /path/to/audio.wav \
-    --output frontend-reactjs/public/output_whisper.TextGrid \
-    --no-mfa --json
-
-# Step 2 — align + write final TextGrid (aligner env)
-conda run -n aligner python asr/transcribe.py \
-    --from-json frontend-reactjs/public/output_whisper.json \
-    --audio     /path/to/audio.wav \
-    --output    frontend-reactjs/public/output_whisper.TextGrid
-```
-
-Setting `--output` directly to `frontend-reactjs/public/` means the TextGrid is ready to load as soon as both steps finish.
 
 ### Changing the Whisper model size
 

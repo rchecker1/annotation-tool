@@ -54,23 +54,20 @@ This creates the necessary conda environments (`aligner`, `whisperx`, and `nemo`
 
 ## Transcribing your own audio
 
-To generate a TextGrid from your own audio file, run the ASR pipeline from the `annotation-tool/` directory.
-
-Because ASR and MFA live in different conda environments, the pipeline is two steps combined into one command:
+To generate a TextGrid from your own audio file, run from the `annotation-tool/` directory:
 
 ```bash
-conda run -n whisperx python asr/transcribe.py \
-    --model whisper_asr \
-    --audio  /path/to/your/audio.wav \
-    --output frontend-reactjs/public/output_whisper.TextGrid \
-    --no-mfa --json \
-  && conda run -n aligner python asr/transcribe.py \
-    --from-json frontend-reactjs/public/output_whisper.json \
-    --audio     /path/to/your/audio.wav \
-    --output    frontend-reactjs/public/output_whisper.TextGrid
+bash asr/run_whisper.sh /path/to/your/audio.wav
 ```
 
-Step 1 (`whisperx` env) transcribes the audio and saves a JSON. Step 2 (`aligner` env) runs MFA forced alignment and writes the final TextGrid with both Words and Phonemes tiers into `public/` ready to load.
+This handles everything — transcription and phoneme alignment — and writes the result to `frontend-reactjs/public/output_whisper.TextGrid`, ready to load.
+
+To use a custom output name:
+
+```bash
+bash asr/run_whisper.sh /path/to/your/audio.wav my_output
+# writes: frontend-reactjs/public/my_output.TextGrid
+```
 
 **Changing the Whisper model size** — by default WhisperX uses `tiny.en` (fast, less accurate). To use a larger model, edit line 32 of `asr/models/whisper_asr.py`:
 
