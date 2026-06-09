@@ -2,9 +2,28 @@ import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react-swc';
 import fs from 'fs';
 import path from 'path';
-import { execFile } from 'child_process';
+import { execFile, execFileSync } from 'child_process';
 
-const PYTHON = '/Users/alisartazkhan/miniconda3/envs/aligner/bin/python';
+// Resolve the Python binary for the 'aligner' conda environment.
+// Resolution order:
+//   1. VITE_PYTHON env var  (e.g. VITE_PYTHON=/usr/bin/python3 npm run dev)
+//   2. `conda run -n aligner which python`  (works for any conda install)
+//   3. Falls back to plain `python` and lets the OS PATH decide
+function resolveAlginerPython() {
+  if (process.env.VITE_PYTHON) return process.env.VITE_PYTHON;
+  try {
+    const result = execFileSync('conda', ['run', '-n', 'aligner', 'which', 'python'], {
+      encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    return result.trim();
+  } catch (_) {
+    return 'python';
+  }
+}
+
+const PYTHON = resolveAlginerPython();
+console.log(`[vite] Using Python: ${PYTHON}`);
+
 const DSP_SCRIPT = path.resolve(__dirname, 'dsp_server.py');
 
 function publicFilesPlugin() {
