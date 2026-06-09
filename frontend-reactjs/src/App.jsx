@@ -573,7 +573,7 @@ export default function App() {
   const [specNMels, setSpecNMels] = useState(128);
   const [specNFft, setSpecNFft] = useState(512);
   const [showSpecSettings, setShowSpecSettings] = useState(false);
-  const [editMode, setEditMode]         = useState(false);
+  const [editMode, setEditMode]         = useState(true);
   const [labelEditor, setLabelEditor]   = useState(null); // { id, tierId, tierType, text, x, y, boxW }
   const [editShortcut, setEditShortcut] = useState('1');
   const [editingShortcut, setEditingShortcut] = useState(false);
@@ -650,7 +650,7 @@ export default function App() {
   const specNFftRef      = useRef(512);
   const rmsEnvRef        = useRef(null);
   const formantTrackRef  = useRef(null);
-  const editModeRef      = useRef(false);
+  const editModeRef      = useRef(true);
   const undoStackRef     = useRef([]); // snapshots: { words, phones, customTiers }
   const hoverEdgeRef     = useRef(null); // { id, tierId, side: 'left'|'right' } for cursor feedback
   const selectedTilesRef = useRef(new Map()); // id → { id, tierId } — multi-selected tiles in edit mode
@@ -2796,7 +2796,7 @@ export default function App() {
             onClick={() => { const n = !editModeRef.current; editModeRef.current = n; setEditMode(n); if (!n) clearSelection(); redraw(); }}
             title={`Toggle edit mode (${editShortcut})`}
           >
-            {editMode ? '✎ Editing' : '✎ Edit'}
+            {editMode ? '✎ Edit mode' : '✎ View mode'}
           </button>
           <div className="btn-edit-split__divider" />
           {editingShortcut ? (
