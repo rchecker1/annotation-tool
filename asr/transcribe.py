@@ -4,23 +4,37 @@ glistener/transcribe.py
 ~~~~~~~~~~~~~~~~~~~~~~~
 Audio → TextGrid pipeline using ASR (Whisper or Parakeet) + MFA alignment.
 
-Usage
------
-# Whisper ASR + MFA (whisperx conda env)
-    conda run -n whisperx python /home/alisartazkhan/glistener/transcribe.py \\
-        --model whisper_asr \\
-        --audio  /path/to/audio.wav \\
-        --output /path/to/output.TextGrid
+Because ASR and MFA live in different conda environments, the pipeline is
+split into two steps:
 
-# Parakeet ASR + MFA (nemo conda env)
-    conda run -n nemo python /home/alisartazkhan/glistener/transcribe.py \\
-        --model parakeet \\
-        --audio  /path/to/audio.wav \\
-        --output /path/to/output.TextGrid
+  Step 1 — ASR only (whisperx or nemo env):
+      conda run -n whisperx python asr/transcribe.py \\
+          --model whisper_asr \\
+          --audio  /path/to/audio.wav \\
+          --output /path/to/output.TextGrid \\
+          --no-mfa --json
+
+      This writes output.TextGrid (words only) and output.json.
+
+  Step 2 — MFA + final TextGrid (aligner env):
+      conda run -n aligner python asr/transcribe.py \\
+          --from-json /path/to/output.json \\
+          --audio     /path/to/audio.wav \\
+          --output    /path/to/output.TextGrid
+
+      This reads the JSON from step 1, runs KalpyAligner, and overwrites
+      the TextGrid with both Words and Phonemes tiers.
+
+One-step convenience (if MFA is available in the current env):
+      conda run -n whisperx python asr/transcribe.py \\
+          --model whisper_asr \\
+          --audio  /path/to/audio.wav \\
+          --output /path/to/output.TextGrid
 
 Optional flags
 --------------
   --no-mfa          Skip MFA; TextGrid will have a Words tier but empty Phonemes tier.
+  --from-json PATH  Skip ASR; load a previously saved JSON result and run MFA + TextGrid.
   --dictionary      MFA dictionary name or path   (default: english_us_arpa)
   --acoustic-model  MFA acoustic model name/path  (default: english_us_arpa)
   --json            Also save the raw result dict as <output>.json
@@ -28,8 +42,8 @@ Optional flags
 
 Output TextGrid tiers
 ---------------------
-  Words     — word intervals with label  "word [conf=0.9512]"
-  Phonemes  — MFA phone intervals (IPA / ARPAbet symbols)
+  Words     — one interval per word with a separate score line
+  Phonemes  — MFA phone intervals (IPA symbols)
 
 Notes on long audio
 -------------------
@@ -46,9 +60,6 @@ import json
 import sys
 from pathlib import Path
 
-# Make the glistener package importable when run as a script from any cwd.
-# _HERE  = .../glistener/
-# _REPO  = .../           (parent of the glistener package dir)
 _HERE = Path(__file__).resolve().parent
 _REPO = _HERE.parent
 for _p in (_REPO, _HERE):
@@ -82,13 +93,17 @@ def main() -> None:
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    ap.add_argument("--model", required=True,
-                    choices=["whisper_asr", "parakeet"],
-                    help="ASR model to use.")
+    # ASR source — either run a model or load a pre-saved JSON
+    src = ap.add_mutually_exclusive_group()
+    src.add_argument("--model", choices=["whisper_asr", "parakeet"],
+                     help="ASR model to run (step 1).")
+    src.add_argument("--from-json", type=Path, metavar="JSON",
+                     help="Skip ASR; load this JSON result file and run MFA + TextGrid (step 2).")
+
     ap.add_argument("--audio", required=True, type=Path,
-                    help="Input audio file (any format supported by ffmpeg/librosa).")
+                    help="Input audio file.")
     ap.add_argument("--output", required=True, type=Path,
-                    help="Output TextGrid path (e.g. result.TextGrid).")
+                    help="Output TextGrid path.")
     ap.add_argument("--no-mfa", action="store_true",
                     help="Skip MFA forced alignment (Phonemes tier will be empty).")
     ap.add_argument("--dictionary", default="english_us_arpa",
@@ -101,6 +116,9 @@ def main() -> None:
                     help="Override the default model checkpoint (Whisper only).")
     args = ap.parse_args()
 
+    if args.model is None and args.from_json is None:
+        ap.error("Provide either --model or --from-json.")
+
     audio = args.audio.expanduser().resolve()
     if not audio.is_file():
         ap.error(f"Audio file not found: {audio}")
@@ -108,21 +126,31 @@ def main() -> None:
     out_path = args.output.expanduser().resolve()
 
     # ------------------------------------------------------------------ #
-    #  Stage 1 — ASR                                                       #
+    #  Stage 1 — ASR  (skipped when --from-json is given)                 #
     # ------------------------------------------------------------------ #
-    print(f"\n[glistener] Model  : {args.model}")
-    print(f"[glistener] Audio  : {audio}")
-    print(f"[glistener] Output : {out_path}\n")
+    if args.from_json:
+        json_src = args.from_json.expanduser().resolve()
+        if not json_src.is_file():
+            ap.error(f"JSON file not found: {json_src}")
+        print(f"\n[glistener] Loading ASR result from {json_src}")
+        with open(json_src, encoding="utf-8") as f:
+            result = json.load(f)
+        n_words = sum(len(seg.get("words", [])) for seg in result.get("segments", []))
+        print(f"[glistener] Loaded: {len(result.get('segments', []))} segment(s), {n_words} word(s).")
+    else:
+        print(f"\n[glistener] Model  : {args.model}")
+        print(f"[glistener] Audio  : {audio}")
+        print(f"[glistener] Output : {out_path}\n")
 
-    model = _load_model(args.model, args.checkpoint)
-    print(f"[glistener] Transcribing…")
-    result = model.transcribe(audio)
-    result["source_file"] = str(audio)
-    result["model"] = args.model
+        model = _load_model(args.model, args.checkpoint)
+        print("[glistener] Transcribing…")
+        result = model.transcribe(audio)
+        result["source_file"] = str(audio)
+        result["model"] = args.model
 
-    n_words = sum(len(seg.get("words", [])) for seg in result.get("segments", []))
-    n_segs  = len(result.get("segments", []))
-    print(f"[glistener] ASR done: {n_segs} segment(s), {n_words} word(s).")
+        n_words = sum(len(seg.get("words", [])) for seg in result.get("segments", []))
+        n_segs  = len(result.get("segments", []))
+        print(f"[glistener] ASR done: {n_segs} segment(s), {n_words} word(s).")
 
     # ------------------------------------------------------------------ #
     #  Stage 2 — MFA phoneme alignment                                     #
