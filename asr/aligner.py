@@ -1,100 +1,288 @@
 """
 aligner.py
 ~~~~~~~~~~
-MFA (Montreal Forced Aligner) phoneme alignment.
+MFA (Montreal Forced Aligner) phoneme alignment using the persistent
+KalpyAligner — same approach as mfa_server.py.
 
 Given an ASR result dict (segments with word-level timestamps) and the
-original audio file, runs `mfa align` per segment, then writes phoneme
+original audio file, aligns each segment in-process and writes phoneme
 intervals back into each segment under ``phoneme_chars_mfa``.
 
-Resolution order for the mfa binary:
-  1. MFA_EXECUTABLE env var
-  2. <conda_root>/envs/<MFA_CONDA_ENV>/bin/mfa   (default env name: aligner)
-  3. shutil.which("mfa")
+This avoids cold-starting the full FST via ``mfa align`` subprocess (~60 s
+per call).  Instead, models are loaded once (~15 s) and reused for every
+segment (~1–4 s each).
 
 Prerequisites (one-time):
-    mfa model download dictionary english_mfa
-    mfa model download acoustic english_mfa
+    mfa model download dictionary english_us_arpa
+    mfa model download acoustic english_us_arpa
 """
 
 from __future__ import annotations
 
 import os
 import re
-import shutil
-import subprocess
+import string
 import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-try:
-    import textgrids
-    _TEXTGRIDS_OK = True
-except ImportError:
-    _TEXTGRIDS_OK = False
+import numpy as np
+
+# ---------------------------------------------------------------------------
+# ARPAbet → IPA  (same table as mfa_server.py)
+# ---------------------------------------------------------------------------
+
+_ARPABET_TO_IPA: dict[str, str] = {
+    'AA': 'ɑ',  'AE': 'æ',  'AH': 'ʌ',  'AO': 'ɔ',
+    'AW': 'aʊ', 'AY': 'aɪ', 'EH': 'ɛ',  'ER': 'ɝ',
+    'EY': 'eɪ', 'IH': 'ɪ',  'IY': 'i',  'OW': 'oʊ',
+    'OY': 'ɔɪ', 'UH': 'ʊ',  'UW': 'u',
+    'B':  'b',  'CH': 'tʃ', 'D':  'd',  'DH': 'ð',
+    'F':  'f',  'G':  'g',  'HH': 'h',  'JH': 'dʒ',
+    'K':  'k',  'L':  'l',  'M':  'm',  'N':  'n',
+    'NG': 'ŋ',  'P':  'p',  'R':  'ɹ',  'S':  's',
+    'SH': 'ʃ',  'T':  't',  'TH': 'θ',  'V':  'v',
+    'W':  'w',  'Y':  'j',  'Z':  'z',  'ZH': 'ʒ',
+    'SPN': 'spn', 'SP': 'sp', 'SIL': 'sil',
+}
+
+_SILENCE_IPA = {'spn', 'sp', 'sil'}
+
+def _arpa_to_ipa(phone: str) -> str:
+    key = phone.rstrip('012').upper()
+    return _ARPABET_TO_IPA.get(key, phone)
 
 
 # ---------------------------------------------------------------------------
-# MFA executable resolution
+# Lazy-loaded KalpyAligner (module-level singleton, same pattern as mfa_server)
 # ---------------------------------------------------------------------------
 
-def _resolve_mfa() -> Optional[str]:
-    override = os.environ.get("MFA_EXECUTABLE", "").strip()
-    if override and Path(override).is_file():
-        return override
+_kalpy_aligner = None
+_kalpy_aligner_params: tuple[str, str] | None = None  # (acoustic_model, dictionary)
 
-    conda_exe = os.environ.get("CONDA_EXE", "").strip()
-    if conda_exe:
-        env_name = os.environ.get("MFA_CONDA_ENV", "aligner").strip() or "aligner"
-        root = Path(conda_exe).resolve().parent.parent
-        candidate = root / "envs" / env_name / "bin" / "mfa"
-        if candidate.is_file():
-            return str(candidate)
+TARGET_SR = 16_000
 
-    return shutil.which("mfa")
+
+def _get_aligner(acoustic_model: str, dictionary: str):
+    global _kalpy_aligner, _kalpy_aligner_params
+
+    params = (acoustic_model, dictionary)
+    if _kalpy_aligner is not None and _kalpy_aligner_params == params:
+        return _kalpy_aligner
+
+    from montreal_forced_aligner.models import AcousticModel
+    from montreal_forced_aligner.alignment.multiprocessing import KalpyAligner
+    from kalpy.fstext.lexicon import LexiconCompiler
+
+    acoustic_path = (Path.home() / 'Documents' / 'MFA' / 'pretrained_models' /
+                     'acoustic' / f'{acoustic_model}.zip')
+    dict_path = (Path.home() / 'Documents' / 'MFA' / 'pretrained_models' /
+                 'dictionary' / f'{dictionary}.dict')
+
+    if not acoustic_path.exists():
+        raise FileNotFoundError(
+            f'Acoustic model not found: {acoustic_path}\n'
+            f'Run: mfa model download acoustic {acoustic_model}')
+    if not dict_path.exists():
+        raise FileNotFoundError(
+            f'Dictionary not found: {dict_path}\n'
+            f'Run: mfa model download dictionary {dictionary}')
+
+    import time
+    print(f'[MFA] Loading models (one-time, ~15 s) …')
+    t0 = time.time()
+
+    model = AcousticModel(str(acoustic_path))
+    p = model.parameters
+
+    lc = LexiconCompiler(
+        silence_probability=p['silence_probability'],
+        initial_silence_probability=p['initial_silence_probability'],
+        final_silence_correction=p['final_silence_correction'],
+        final_non_silence_correction=p['final_non_silence_correction'],
+        silence_phone=p['optional_silence_phone'],
+        oov_phone=p['oov_phone'],
+        position_dependent_phones=p['position_dependent_phones'],
+        phones=p['non_silence_phones'],
+    )
+    lc.load_pronunciations(dict_path)
+    lc.create_fsts()
+
+    _kalpy_aligner = KalpyAligner(model, lc)
+    _kalpy_aligner_params = params
+
+    print(f'[MFA] Models ready in {time.time() - t0:.1f} s')
+    return _kalpy_aligner
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Dictionary helpers (OOV substitution — same logic as mfa_server.py)
+# ---------------------------------------------------------------------------
+
+_dict_words_cache: dict[str, frozenset] = {}
+
+
+def _load_dict_words(dictionary: str) -> frozenset:
+    if dictionary in _dict_words_cache:
+        return _dict_words_cache[dictionary]
+
+    dict_path = (Path.home() / 'Documents' / 'MFA' / 'pretrained_models' /
+                 'dictionary' / f'{dictionary}.dict')
+    if not dict_path.exists():
+        print(f'[MFA] Dictionary file not found at {dict_path}')
+        _dict_words_cache[dictionary] = frozenset()
+        return frozenset()
+
+    words: set[str] = set()
+    with open(dict_path, encoding='utf-8') as f:
+        for line in f:
+            w = line.split()[0].lower() if line.strip() else None
+            if w:
+                words.add(w)
+    print(f'[MFA] Loaded {len(words)} words from {dict_path.name}')
+    result = frozenset(words)
+    _dict_words_cache[dictionary] = result
+    return result
+
+
+def _edit_distance(a: str, b: str) -> int:
+    if a == b: return 0
+    if not a:  return len(b)
+    if not b:  return len(a)
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        curr = [i]
+        for j, cb in enumerate(b, 1):
+            curr.append(min(prev[j] + 1, curr[j-1] + 1,
+                            prev[j-1] + (0 if ca == cb else 1)))
+        prev = curr
+    return prev[-1]
+
+
+def _closest_dict_word(word: str, dictionary: str) -> tuple[str, int] | None:
+    vocab = _load_dict_words(dictionary)
+    if not vocab:
+        return None
+    n = len(word)
+    candidates = [w for w in vocab if abs(len(w) - n) <= max(3, n // 2)] or list(vocab)
+    best = min(candidates, key=lambda w: _edit_distance(word, w))
+    return best, _edit_distance(word, best)
+
+
+def _substitute_oov(words: list[str], dictionary: str) -> tuple[list[str], dict[str, str]]:
+    """Return (substituted_words, oov_subs_map). Mirrors mfa_server.py logic."""
+    vocab = _load_dict_words(dictionary)
+    if not vocab:
+        return words, {}
+
+    subbed: list[str] = []
+    oov_subs: dict[str, str] = {}
+    for w in words:
+        if w in vocab:
+            subbed.append(w)
+        else:
+            match = _closest_dict_word(w, dictionary)
+            if match:
+                closest, dist = match
+                oov_subs[w] = closest
+                print(f'[MFA] OOV: "{w}" → "{closest}" (edit distance {dist})')
+                subbed.append(closest)
+            else:
+                subbed.append(w)
+    return subbed, oov_subs
+
+
+# ---------------------------------------------------------------------------
+# Audio helpers
+# ---------------------------------------------------------------------------
+
+def _read_and_resample(path: Path) -> tuple[np.ndarray, float]:
+    import soundfile as sf
+    data, sr = sf.read(str(path), dtype='float32', always_2d=True)
+    mono = data.mean(axis=1)
+
+    if sr != TARGET_SR:
+        try:
+            import soxr
+            mono = soxr.resample(mono, sr, TARGET_SR, quality='HQ')
+        except ImportError:
+            n_out = int(len(mono) * TARGET_SR / sr)
+            mono = np.interp(
+                np.linspace(0, len(mono) - 1, n_out),
+                np.arange(len(mono)), mono,
+            ).astype(np.float32)
+
+    duration = len(mono) / TARGET_SR
+    return mono, duration
+
+
+def _write_wav_16k(path: Path, samples: np.ndarray):
+    import soundfile as sf
+    sf.write(str(path), samples, TARGET_SR, subtype='PCM_16')
+
+
+# ---------------------------------------------------------------------------
+# Per-segment helpers
 # ---------------------------------------------------------------------------
 
 def _segment_text(seg: Dict[str, Any]) -> str:
-    words = seg.get("words") or []
-    parts = [(w.get("word") or "").strip() for w in words if (w.get("word") or "").strip()]
+    words = seg.get('words') or []
+    parts = [(w.get('word') or '').strip() for w in words if (w.get('word') or '').strip()]
     if parts:
-        return " ".join(parts)
-    return (seg.get("word_text") or seg.get("output") or "").strip()
+        return ' '.join(parts)
+    return (seg.get('word_text') or seg.get('output') or '').strip()
 
 
-def _safe_id(stem: str, idx: int) -> str:
-    base = re.sub(r"[^\w]+", "_", stem, flags=re.ASCII).strip("_")
-    return f"{base or 'utt'}_{idx:04d}"
+def _align_segment(
+    aligner,
+    wav_path: Path,
+    transcript: str,
+    t_offset: float,
+    duration: float,
+) -> tuple[list[dict], list[dict]]:
+    """
+    Align one segment.  Returns (phones_tier, words_tier) in the same format
+    as mfa_server.py's /align endpoint.
+    """
+    from kalpy.utterance import Utterance, Segment
 
+    segment = Segment(str(wav_path), 0.0, duration, 0)
+    utt = Utterance(segment, transcript, None, None)
+    ctm = aligner.align_utterance(utt)
+    ctm.update_utterance_boundaries(t_offset, t_offset + duration)
 
-def _ffmpeg_slice(src: Path, dst: Path, t0: float, duration: float) -> bool:
-    cmd = [
-        "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-        "-i", str(src),
-        "-ss", str(t0), "-t", str(duration),
-        "-acodec", "pcm_s16le",
-        str(dst),
-    ]
-    try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-        return r.returncode == 0 and dst.is_file()
-    except (OSError, subprocess.TimeoutExpired):
-        return False
+    phones_tier: list[dict] = []
+    words_tier: list[dict] = []
+
+    for wi in ctm.word_intervals:
+        if wi.label and wi.label not in ('', '<eps>'):
+            words_tier.append({
+                't0': round(wi.begin, 6),
+                't1': round(wi.end,   6),
+                'text': wi.label,
+            })
+        for pi in wi.phones:
+            label = pi.label or ''
+            ipa = _arpa_to_ipa(label)
+            if label and label not in ('', '<eps>') and ipa not in _SILENCE_IPA:
+                phones_tier.append({
+                    't0': round(pi.begin, 6),
+                    't1': round(pi.end,   6),
+                    'text': ipa,
+                })
+
+    return phones_tier, words_tier
 
 
 # ---------------------------------------------------------------------------
-# Main align function
+# Public entry point
 # ---------------------------------------------------------------------------
 
 def run_mfa(
     result: Dict[str, Any],
     audio_path: Path,
-    dictionary: str = "english_mfa",
-    acoustic_model: str = "english_mfa",
+    dictionary: str = 'english_us_arpa',
+    acoustic_model: str = 'english_us_arpa',
 ) -> Dict[str, Any]:
     """
     Mutates *result* in-place: adds ``phoneme_chars_mfa`` to each segment
@@ -102,135 +290,91 @@ def run_mfa(
 
     Returns the (possibly mutated) result dict.
     """
-    if not _TEXTGRIDS_OK:
-        print("[MFA] Skipping: install the 'textgrids' package to parse MFA output.")
+    try:
+        aligner = _get_aligner(acoustic_model, dictionary)
+    except (FileNotFoundError, ImportError) as e:
+        print(f'[MFA] Skipping: {e}')
         return result
 
-    mfa_exe = _resolve_mfa()
-    if mfa_exe is None:
-        print(
-            "[MFA] Skipping: mfa binary not found.\n"
-            "  Install: mamba create -n aligner -c conda-forge montreal-forced-aligner\n"
-            "  Then:    mfa model download dictionary english_mfa\n"
-            "           mfa model download acoustic english_mfa"
-        )
-        return result
-
-    if not shutil.which("ffmpeg"):
-        print("[MFA] Skipping: ffmpeg not found (needed to slice segments).")
-        return result
-
-    segments: List[Dict[str, Any]] = result.get("segments", [])
+    segments: List[Dict[str, Any]] = result.get('segments', [])
     if not segments:
         return result
 
     audio_path = audio_path.resolve()
-    stem = audio_path.stem
+    flat_phones: List[Dict[str, Any]] = []
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        corpus  = Path(tmpdir) / "corpus"
-        out_dir = Path(tmpdir) / "out"
-        corpus.mkdir()
-        out_dir.mkdir()
+    with tempfile.TemporaryDirectory(prefix='mfa_align_') as tmpdir:
+        tmp = Path(tmpdir)
 
-        plan: List[Tuple[int, float, str]] = []  # (seg_index, global_offset, utt_id)
+        # Load the full audio once and resample to 16 kHz
+        try:
+            full_samples, full_duration = _read_and_resample(audio_path)
+        except Exception as e:
+            print(f'[MFA] Could not read audio {audio_path}: {e}')
+            return result
 
         for seg_i, seg in enumerate(segments):
-            text = _segment_text(seg)
-            if not text:
+            text_raw = _segment_text(seg)
+            if not text_raw:
                 continue
-            t0  = float(seg.get("start") or 0)
-            t1  = float(seg.get("end")   or 0)
+
+            t0  = float(seg.get('start') or 0)
+            t1  = float(seg.get('end')   or 0)
             dur = t1 - t0
             if dur < 0.05:
                 continue
 
-            utt_id  = _safe_id(stem, seg_i)
-            wav_out = corpus / f"{utt_id}.wav"
-            if not _ffmpeg_slice(audio_path, wav_out, t0, dur):
-                print(f"[MFA] ffmpeg failed for segment {seg_i}; skipping.")
-                continue
-            (corpus / f"{utt_id}.lab").write_text(text + "\n", encoding="utf-8")
-            plan.append((seg_i, t0, utt_id))
+            # Normalise words (strip punctuation, lower) then substitute OOV
+            words_raw = [w.strip(string.punctuation).lower() for w in text_raw.split()]
+            words_raw = [w for w in words_raw if w]
+            words_subbed, oov_subs = _substitute_oov(words_raw, dictionary)
+            transcript = ' '.join(words_subbed)
 
-        if not plan:
-            print("[MFA] No usable segments; skipping.")
-            return result
+            # Slice the resampled audio for this segment
+            s0 = int(t0 * TARGET_SR)
+            s1 = int(t1 * TARGET_SR)
+            seg_samples = full_samples[s0:s1]
 
-        mfa_bin_dir = Path(mfa_exe).resolve().parent
-        env = os.environ.copy()
-        env["PATH"] = str(mfa_bin_dir) + os.pathsep + env.get("PATH", "")
-
-        cmd = [
-            mfa_exe, "align", "--clean",
-            "--num_jobs", "1",
-            "--single_speaker",
-            str(corpus), dictionary, acoustic_model, str(out_dir),
-        ]
-        print(f"[MFA] Aligning {len(plan)} segment(s): {' '.join(cmd)}")
-        try:
-            proc = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=7200, env=env,
-            )
-        except FileNotFoundError:
-            print("[MFA] subprocess failed to start.")
-            return result
-        except subprocess.TimeoutExpired:
-            print("[MFA] Timed out.")
-            return result
-
-        if proc.returncode != 0:
-            print(f"[MFA] Failed (exit {proc.returncode}).")
-            if proc.stderr:
-                print(proc.stderr[-4000:])
-            return result
-
-        flat_phones: List[Dict[str, Any]] = []
-
-        for seg_i, offset, utt_id in plan:
-            tg_path = out_dir / f"{utt_id}.TextGrid"
-            if not tg_path.is_file():
-                cands = list(out_dir.rglob(f"{utt_id}.TextGrid"))
-                tg_path = cands[0] if cands else tg_path
-            if not tg_path.is_file():
-                print(f"[MFA] Missing TextGrid for {utt_id}")
+            if len(seg_samples) < int(0.05 * TARGET_SR):
+                print(f'[MFA] Segment {seg_i} too short after slice; skipping.')
                 continue
 
+            wav_path = tmp / f'seg_{seg_i:04d}.wav'
             try:
-                grid = textgrids.TextGrid(str(tg_path))
+                _write_wav_16k(wav_path, seg_samples)
             except Exception as e:
-                print(f"[MFA] Could not read {tg_path}: {e}")
+                print(f'[MFA] Could not write WAV for segment {seg_i}: {e}')
                 continue
 
-            tier_name = next((k for k in grid if "phone" in k.lower()), None)
-            if tier_name is None:
-                print(f"[MFA] No phones tier for {utt_id}. Tiers: {list(grid.keys())}")
+            import time
+            t_start = time.time()
+            try:
+                phones_tier, _words_tier = _align_segment(
+                    aligner, wav_path, transcript, t0, len(seg_samples) / TARGET_SR,
+                )
+            except Exception as e:
+                print(f'[MFA] Alignment failed for segment {seg_i} ("{transcript}"): {e}')
                 continue
 
-            local: List[Dict[str, Any]] = []
-            for iv in grid[tier_name]:
-                txt = getattr(iv, "text", "") or ""
-                if isinstance(txt, list):
-                    txt = "".join(str(x) for x in txt)
-                txt = str(txt).strip()
-                if not txt or txt in {"sil", "spn", "sp", "SIL", "<eps>"}:
-                    continue
-                try:
-                    xs, xe = float(iv.xmin), float(iv.xmax)
-                except (TypeError, ValueError):
-                    continue
-                phone = {"char": txt, "start": offset + xs, "end": offset + xe}
-                local.append(phone)
-                flat_phones.append(phone)
+            print(f'[MFA] Segment {seg_i}: {len(phones_tier)} phones in {time.time()-t_start:.2f}s'
+                  + (f'  OOV subs: {oov_subs}' if oov_subs else ''))
 
-            segments[seg_i]["phoneme_chars_mfa"] = local
-            if local and not segments[seg_i].get("phoneme_chars"):
-                segments[seg_i]["phoneme_chars"] = local
-            if local and not segments[seg_i].get("phoneme_text"):
-                segments[seg_i]["phoneme_text"] = " ".join(p["char"] for p in local)
+            # Convert phones_tier format to the internal phoneme_chars schema
+            local: List[Dict[str, Any]] = [
+                {'char': p['text'], 'start': p['t0'], 'end': p['t1']}
+                for p in phones_tier
+            ]
 
-        flat_phones.sort(key=lambda p: (p["start"], p["end"]))
-        result["phoneme_chars_mfa_flat"] = flat_phones
-        result["aligner"] = "mfa"
+            seg['phoneme_chars_mfa'] = local
+            if local and not seg.get('phoneme_chars'):
+                seg['phoneme_chars'] = local
+            if local and not seg.get('phoneme_text'):
+                seg['phoneme_text'] = ' '.join(p['char'] for p in local)
+
+            flat_phones.extend(local)
+
+    flat_phones.sort(key=lambda p: (p['start'], p['end']))
+    result['phoneme_chars_mfa_flat'] = flat_phones
+    result['aligner'] = 'mfa'
 
     return result

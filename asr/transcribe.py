@@ -21,8 +21,8 @@ Usage
 Optional flags
 --------------
   --no-mfa          Skip MFA; TextGrid will have a Words tier but empty Phonemes tier.
-  --dictionary      MFA dictionary name or path   (default: english_mfa)
-  --acoustic-model  MFA acoustic model name/path  (default: english_mfa)
+  --dictionary      MFA dictionary name or path   (default: english_us_arpa)
+  --acoustic-model  MFA acoustic model name/path  (default: english_us_arpa)
   --json            Also save the raw result dict as <output>.json
   --checkpoint      Override model checkpoint (Whisper only)
 
@@ -91,10 +91,10 @@ def main() -> None:
                     help="Output TextGrid path (e.g. result.TextGrid).")
     ap.add_argument("--no-mfa", action="store_true",
                     help="Skip MFA forced alignment (Phonemes tier will be empty).")
-    ap.add_argument("--dictionary", default="english_mfa",
-                    help="MFA dictionary name or path (default: english_mfa).")
-    ap.add_argument("--acoustic-model", default="english_mfa", dest="acoustic_model",
-                    help="MFA acoustic model name or path (default: english_mfa).")
+    ap.add_argument("--dictionary", default="english_us_arpa",
+                    help="MFA dictionary name or path (default: english_us_arpa).")
+    ap.add_argument("--acoustic-model", default="english_us_arpa", dest="acoustic_model",
+                    help="MFA acoustic model name or path (default: english_us_arpa).")
     ap.add_argument("--json", action="store_true",
                     help="Also save raw ASR result as <output>.json.")
     ap.add_argument("--checkpoint", default=None,
