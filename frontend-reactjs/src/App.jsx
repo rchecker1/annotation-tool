@@ -2025,8 +2025,6 @@ export default function App() {
         return;
       }
 
-      pushUndo();
-
       if (side === 'left' || side === 'right') {
         // Edge drag — always single tile
         const startX = e.clientX;
@@ -2042,7 +2040,9 @@ export default function App() {
           ? (neighbour ? neighbour.t1 - 0.01 : DUR)
           : item.t1 - 0.01;
 
+        let didPushUndo = false;
         const onMove = (ev) => {
+          if (!didPushUndo) { pushUndo(); didPushUndo = true; }
           const dx = ev.clientX - startX;
           const dt = (dx / rect.width) * (viewRef.current.t1 - viewRef.current.t0);
           let newT = Math.max(minT, Math.min(maxT, startT + dt));
@@ -2094,6 +2094,7 @@ export default function App() {
       } else if (side === 'body') {
         const startX = e.clientX;
         let didDrag = false;
+        let didPushUndo = false;
         // Use group drag if this tile is part of an existing multi-selection
         const isMultiDrag = wasInGroup;
 
@@ -2119,6 +2120,7 @@ export default function App() {
           const groupOrigT1 = Math.max(...allOrig.map(o => o.origT1));
 
           const onMove = (ev) => {
+            if (!didPushUndo) { pushUndo(); didPushUndo = true; }
             didDrag = true;
             const dx = ev.clientX - startX;
             let dt = Math.max(minDt, Math.min(maxDt,
@@ -2206,6 +2208,7 @@ export default function App() {
           const width = origT1 - origT0;
 
           const onMove = (ev) => {
+            if (!didPushUndo) { pushUndo(); didPushUndo = true; }
             didDrag = true;
             const dx = ev.clientX - startX;
             const dt = (dx / rect.width) * (viewRef.current.t1 - viewRef.current.t0);
