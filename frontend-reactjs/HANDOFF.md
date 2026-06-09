@@ -211,18 +211,18 @@ Word tiles use a slightly heavier weight (`500`); phoneme tiles use a monospace 
 
 ## Edit Mode
 
-Toggled by the **split Edit button** in the toolbar or the configurable keyboard shortcut (default `1`).
+**Edit mode is on by default on load** (`useState(true)` / `useRef(true)`). Toggled by the **split Edit button** in the toolbar or the configurable keyboard shortcut (default `1`).
 
 ### Split Edit Button
 
 The Edit button is a single unified control split into two clickable zones:
 
 ```
-┌─────────────────┬──────┐
-│   ✎ Edit        │  1   │
-└─────────────────┴──────┘
-        ↑ toggles       ↑ click to rebind
-      edit mode         shortcut
+┌──────────────────┬──────┐
+│  ✎ Edit mode     │  1   │
+└──────────────────┴──────┘
+        ↑ toggles        ↑ click to rebind
+      edit mode          shortcut
 ```
 
 - **Left half** (`.btn-edit-split__main`) — toggles edit mode
@@ -230,6 +230,7 @@ The Edit button is a single unified control split into two clickable zones:
 - **Right half** (`.btn-edit-split__badge`) — shows current hotkey; click to enter shortcut-capture mode
 - **Capture input** (`.btn-edit-split__capture`) — replaces the badge while waiting for a keypress; `onBlur` cancels
 - When active, the entire button inverts (`.btn-edit-split.active`)
+- Label reads **`✎ Edit mode`** when active, **`✎ View mode`** when inactive — always shows the current mode
 
 Default shortcut is `1`. The keyboard handler matches against `e.code`, `e.key`, and numpad aliases (so numpad `1` also fires edit mode regardless of NumLock state).
 
@@ -383,6 +384,21 @@ Three dev-only endpoints are registered:
 | `/api/save-textgrid` | POST | Writes serialized TextGrid to `public/<filename>.TextGrid` |
 | `/api/compute-dsp` | POST | Shells out to `dsp_server.py` for mel spectrogram + formants |
 
+#### Python path resolution
+
+`PYTHON` is resolved dynamically at server startup — **do not hardcode a user-specific path**:
+
+```js
+// Resolution order:
+// 1. VITE_PYTHON env var  (e.g. VITE_PYTHON=/custom/python npm run dev)
+// 2. `conda run -n aligner which python`  (works for any conda install location)
+// 3. Falls back to plain `python` and lets the OS PATH decide
+function resolveAlignerPython() { ... }
+const PYTHON = resolveAlignerPython();
+```
+
+On startup, Vite prints `[vite] Using Python: /path/to/aligner/bin/python` so users can confirm it resolved correctly.
+
 ```js
 server.middlewares.use('/api/save-textgrid', (req, res) => {
   // POST body: { filename: string, content: string }
@@ -408,11 +424,25 @@ const saveTextGrid = useCallback(async () => {
 ### Save indicator
 
 Appears inline in the logo bar:
-- `⟳ Saving…` — blue, request in flight
+- `● Unsaved` — amber, shown whenever the current state differs from the loaded TextGrid
+- `⟳ Saving…` — blue, request in flight (replaces Unsaved while saving)
 - `✓ Saved` — green, fades after 2s
 - `✕ Save failed` — red, fades after 2s
 
-CSS classes: `.save-indicator`, `.save-indicator--saving`, `.save-indicator--saved`, `.save-indicator--error`.
+CSS classes: `.save-indicator`, `.save-indicator--unsaved`, `.save-indicator--saving`, `.save-indicator--saved`, `.save-indicator--error`.
+
+### Unsaved state tracking
+
+```js
+const [isDirty, setIsDirty]  = useState(false);
+const savedTextGridRef       = useRef(null);  // serialized baseline after load or save
+```
+
+- `loadTextGrid` serializes the just-loaded data into `savedTextGridRef` and sets `isDirty = false`.
+- `pushUndo` (called before every edit) sets `isDirty = true`.
+- `popUndo` re-serializes the post-undo state and compares to `savedTextGridRef` — undoing all the way back to the original clears the indicator.
+- On successful save, `savedTextGridRef` is updated to the saved content and `isDirty = false`.
+- The `● Unsaved` indicator is hidden while `saveState` is non-null (i.e. while saving/saved/error is showing).
 
 **Note:** this endpoint does not exist in a production build. The ↓ Export button (browser download) works in both dev and production.
 
@@ -743,7 +773,8 @@ Notable component classes:
 | `.btn-edit-split__capture` | Key-capture input (shown during rebind) |
 | `.edit-hint-bar` | Shortcut hint bar shown in edit mode |
 | `.save-indicator` | Inline save status in logo bar |
-| `.save-indicator--saving/saved/error` | State variants |
+| `.save-indicator--unsaved` | Amber — unsaved changes present |
+| `.save-indicator--saving/saved/error` | Blue/green/red state variants |
 
 `.panel-divider` and `.tier-divider` share one rule. `.panel-gutter` and `.tier-gutter` share a base rule; `.tier-gutter` adds `flex-direction: column; gap: 3px`.
 
@@ -786,6 +817,14 @@ Notable component classes:
 - **`ipa_keys.json` must have no trailing comma** after the last entry. The browser's `JSON.parse` is strict; a trailing comma produces an empty keyboard silently.
 
 - **Right-click check `if (e.button === 2) return` must be the first statement** in `onMouseDown`. Any hit-testing before this check causes unwanted tier selection on right-click.
+
+- **Edit mode is on by default.** Both `useState(true)` and `useRef(true)` must match — if you change the default, update both.
+
+- **`savedTextGridRef` must be updated on every successful save** alongside `setIsDirty(false)`. If only one is updated, the unsaved indicator will be wrong after the next undo.
+
+- **`popUndo` re-serializes to check dirty state** — it cannot just set `isDirty = false` unconditionally, because undoing a change on top of a previously-unsaved change should keep the indicator on.
+
+- **Do not hardcode the Python path in `vite.config.js`.** Use `resolveAlignerPython()` so the tool works on any machine. Override with `VITE_PYTHON` env var if needed.
 
 - **MFA uses `english_us_arpa`** (200k-word ARPAbet dictionary), not `english_mfa` (42k words).
 
