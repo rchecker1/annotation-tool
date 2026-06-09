@@ -6,6 +6,7 @@ frontend-reactjs/dist/
 frontend-reactjs/.vite/
 frontend-reactjs/public/*.wav
 frontend-reactjs/public/*.TextGrid
+frontend-reactjs/public/*.json
 
 # Local env files
 .env
