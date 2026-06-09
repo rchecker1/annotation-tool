@@ -37,8 +37,8 @@ WhisperX word scores come from its wav2vec2 forced aligner. Parakeet word scores
 ### MFA (one-time setup)
 MFA runs in the `aligner` conda env. Download the English models once:
 ```bash
-conda run -n aligner mfa model download dictionary english_mfa
-conda run -n aligner mfa model download acoustic english_mfa
+conda run -n aligner mfa model download dictionary english_us_arpa
+conda run -n aligner mfa model download acoustic english_us_arpa
 ```
 
 ### Conda environments
@@ -54,27 +54,54 @@ Key packages:
 - **whisperx**: `whisperx`, `transformers`, `torch`, `librosa`
 - **nemo** (Parakeet): `nemo-toolkit`, `torch`, `librosa`, `soundfile`, `omegaconf`
 
-The `aligner` env (MFA) is separate — install `montreal-forced-aligner` and `textgrids` there.
+The `aligner` env (MFA) is separate — install `montreal-forced-aligner` there.
 
 ## Usage
 
-Run from the repo root (the `annotation-tool/` directory after cloning):
+ASR and MFA run in different conda environments, so the pipeline is two steps.
+Run both from the `annotation-tool/` directory.
+
+### WhisperX
 
 ```bash
-# WhisperX
+# Step 1 — transcribe (whisperx env)
 conda run -n whisperx python asr/transcribe.py \
     --model whisper_asr \
     --audio  /path/to/audio.wav \
-    --output frontend-reactjs/public/output_whisper.TextGrid
+    --output frontend-reactjs/public/output_whisper.TextGrid \
+    --no-mfa --json
 
-# Parakeet (Linux + NVIDIA GPU only)
+# Step 2 — align + write final TextGrid (aligner env)
+conda run -n aligner python asr/transcribe.py \
+    --from-json frontend-reactjs/public/output_whisper.json \
+    --audio     /path/to/audio.wav \
+    --output    frontend-reactjs/public/output_whisper.TextGrid
+```
+
+Or as a one-liner:
+
+```bash
+conda run -n whisperx python asr/transcribe.py --model whisper_asr --audio /path/to/audio.wav --output frontend-reactjs/public/output_whisper.TextGrid --no-mfa --json && conda run -n aligner python asr/transcribe.py --from-json frontend-reactjs/public/output_whisper.json --audio /path/to/audio.wav --output frontend-reactjs/public/output_whisper.TextGrid
+```
+
+### Parakeet (Linux + NVIDIA GPU only)
+
+```bash
+# Step 1 — transcribe (nemo env)
 conda run -n nemo python asr/transcribe.py \
     --model parakeet \
     --audio  /path/to/audio.wav \
-    --output frontend-reactjs/public/output_whisper.TextGrid
+    --output frontend-reactjs/public/output_whisper.TextGrid \
+    --no-mfa --json
+
+# Step 2 — align + write final TextGrid (aligner env)
+conda run -n aligner python asr/transcribe.py \
+    --from-json frontend-reactjs/public/output_whisper.json \
+    --audio     /path/to/audio.wav \
+    --output    frontend-reactjs/public/output_whisper.TextGrid
 ```
 
-Setting `--output` directly to `frontend-reactjs/public/` means the TextGrid is ready to load as soon as transcription finishes.
+Setting `--output` directly to `frontend-reactjs/public/` means the TextGrid is ready to load as soon as both steps finish.
 
 ### Changing the Whisper model size
 
@@ -88,12 +115,13 @@ _CHECKPOINT = "tiny.en"   # change to e.g. "base.en", "small.en", "large-v3-turb
 
 | Flag | Default | Description |
 |---|---|---|
-| `--model` | required | `whisper_asr` or `parakeet` |
+| `--model` | — | `whisper_asr` or `parakeet` (mutually exclusive with `--from-json`) |
+| `--from-json` | — | Skip ASR; load a saved JSON from step 1 and run MFA + TextGrid |
 | `--audio` | required | Input audio file (any format ffmpeg supports) |
 | `--output` | required | Output `.TextGrid` path |
 | `--no-mfa` | off | Skip MFA; Phonemes tier will be empty |
-| `--dictionary` | `english_mfa` | MFA dictionary name or path |
-| `--acoustic-model` | `english_mfa` | MFA acoustic model name or path |
+| `--dictionary` | `english_us_arpa` | MFA dictionary name or path |
+| `--acoustic-model` | `english_us_arpa` | MFA acoustic model name or path |
 | `--json` | off | Also save the raw ASR result as `<output>.json` |
 | `--checkpoint` | model default | Override model checkpoint (Whisper only) |
 
@@ -178,7 +206,7 @@ Add an `elif` branch in `_load_model()`:
 ```python
 elif name == "your_model":
     try:
-        from asr.models.your_model import YourModel
+        from glistener.models.your_model import YourModel
     except ImportError:
         from models.your_model import YourModel
     m = YourModel()
@@ -189,9 +217,7 @@ elif name == "your_model":
 Then add it to the `choices` list on the `--model` argument:
 
 ```python
-ap.add_argument("--model", required=True,
-                choices=["whisper_asr", "parakeet", "your_model"],
-                ...)
+ap.add_argument("--model", choices=["whisper_asr", "parakeet", "your_model"], ...)
 ```
 
 ### 3. Run it
@@ -200,7 +226,13 @@ ap.add_argument("--model", required=True,
 conda run -n your_env python asr/transcribe.py \
     --model your_model \
     --audio  /path/to/audio.wav \
-    --output /path/to/output.TextGrid
+    --output /path/to/output.TextGrid \
+    --no-mfa --json
+
+conda run -n aligner python asr/transcribe.py \
+    --from-json /path/to/output.json \
+    --audio     /path/to/audio.wav \
+    --output    /path/to/output.TextGrid
 ```
 
 MFA alignment and TextGrid writing happen automatically — no changes needed to `aligner.py` or `textgrid_writer.py`.
@@ -214,7 +246,7 @@ asr/
 ├── environment-whisperx.yml  — conda spec for WhisperX (env: whisperx)
 ├── environment-parakeet.yml  — conda spec for Parakeet (env: nemo)
 ├── transcribe.py        — entry point: parses args, calls model → aligner → writer
-├── aligner.py           — MFA forced alignment (segments audio, runs mfa align, parses output)
+├── aligner.py           — MFA forced alignment via persistent KalpyAligner
 ├── textgrid_writer.py   — writes Words + Phonemes tiers to a .TextGrid file
 └── models/
     ├── whisper_asr.py   — WhisperX wrapper
