@@ -90,14 +90,13 @@ Both scripts handle transcription and MFA alignment automatically — the TextGr
 The scripts run two conda envs in sequence. If you need more control (e.g. rerunning only the alignment step after editing the JSON):
 
 ```bash
-# Step 1 — transcribe only (whisperx env)
+# Step 1 — transcribe only, write JSON (whisperx env)
 conda run -n whisperx python asr/transcribe.py \
     --model whisper_asr \
-    --audio  /path/to/audio.wav \
-    --output frontend-reactjs/public/output_whisper.TextGrid \
-    --no-mfa --json
+    --audio /path/to/audio.wav \
+    --json  frontend-reactjs/public/output_whisper.json
 
-# Step 2 — align + write final TextGrid (aligner env)
+# Step 2 — MFA alignment + TextGrid (aligner env)
 conda run -n aligner python asr/transcribe.py \
     --from-json frontend-reactjs/public/output_whisper.json \
     --audio     /path/to/audio.wav \
@@ -119,11 +118,11 @@ _CHECKPOINT = "tiny.en"   # change to e.g. "base.en", "small.en", "large-v3-turb
 | `--model` | — | `whisper_asr` or `parakeet` (mutually exclusive with `--from-json`) |
 | `--from-json` | — | Skip ASR; load a saved JSON from step 1 and run MFA + TextGrid |
 | `--audio` | required | Input audio file (any format ffmpeg supports) |
-| `--output` | required | Output `.TextGrid` path |
-| `--no-mfa` | off | Skip MFA; Phonemes tier will be empty |
+| `--output` | — | Output `.TextGrid` path. Omit in step 1 to skip the words-only TextGrid. |
+| `--json PATH` | — | Save the raw ASR result as JSON at this path (step 1) |
+| `--no-mfa` | off | Skip MFA; writes a words-only TextGrid (requires `--output`) |
 | `--dictionary` | `english_us_arpa` | MFA dictionary name or path |
 | `--acoustic-model` | `english_us_arpa` | MFA acoustic model name or path |
-| `--json` | off | Also save the raw ASR result as `<output>.json` |
 | `--checkpoint` | model default | Override model checkpoint (Whisper only) |
 
 ### Long audio

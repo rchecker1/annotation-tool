@@ -17,11 +17,10 @@ JSON="frontend-reactjs/public/${NAME}.json"
 echo "[run_parakeet] Step 1: transcribing with Parakeet…"
 conda run -n nemo python asr/transcribe.py \
     --model parakeet \
-    --audio  "$AUDIO" \
-    --output "$OUTPUT" \
-    --no-mfa --json
+    --audio "$AUDIO" \
+    --json  "$JSON"
 
-echo "[run_parakeet] Step 2: MFA alignment…"
+echo "[run_parakeet] Step 2: MFA alignment + TextGrid…"
 conda run -n aligner python asr/transcribe.py \
     --from-json "$JSON" \
     --audio     "$AUDIO" \

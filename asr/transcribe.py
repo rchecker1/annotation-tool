@@ -5,52 +5,42 @@ glistener/transcribe.py
 Audio → TextGrid pipeline using ASR (Whisper or Parakeet) + MFA alignment.
 
 Because ASR and MFA live in different conda environments, the pipeline is
-split into two steps:
+split into two steps handled automatically by the run_whisper.sh /
+run_parakeet.sh convenience scripts:
+
+  bash asr/run_whisper.sh /path/to/audio.wav [output_name]
+
+If you need to run the steps manually:
 
   Step 1 — ASR only (whisperx or nemo env):
       conda run -n whisperx python asr/transcribe.py \\
           --model whisper_asr \\
           --audio  /path/to/audio.wav \\
-          --output /path/to/output.TextGrid \\
-          --no-mfa --json
+          --json   /path/to/output.json
 
-      This writes output.TextGrid (words only) and output.json.
+      This writes only the JSON (no TextGrid).
 
-  Step 2 — MFA + final TextGrid (aligner env):
+  Step 2 — MFA + TextGrid (aligner env):
       conda run -n aligner python asr/transcribe.py \\
           --from-json /path/to/output.json \\
           --audio     /path/to/audio.wav \\
           --output    /path/to/output.TextGrid
 
-      This reads the JSON from step 1, runs KalpyAligner, and overwrites
-      the TextGrid with both Words and Phonemes tiers.
-
-One-step convenience (if MFA is available in the current env):
-      conda run -n whisperx python asr/transcribe.py \\
-          --model whisper_asr \\
-          --audio  /path/to/audio.wav \\
-          --output /path/to/output.TextGrid
-
 Optional flags
 --------------
-  --no-mfa          Skip MFA; TextGrid will have a Words tier but empty Phonemes tier.
-  --from-json PATH  Skip ASR; load a previously saved JSON result and run MFA + TextGrid.
+  --output          Output TextGrid path. Required for step 2 / one-shot runs.
+                    Omit in step 1 to skip writing a words-only TextGrid.
+  --no-mfa          Skip MFA; writes a words-only TextGrid (requires --output).
+  --from-json PATH  Skip ASR; load a previously saved JSON and run MFA + TextGrid.
+  --json PATH       Save the raw ASR result as JSON at this path.
   --dictionary      MFA dictionary name or path   (default: english_us_arpa)
   --acoustic-model  MFA acoustic model name/path  (default: english_us_arpa)
-  --json            Also save the raw result dict as <output>.json
   --checkpoint      Override model checkpoint (Whisper only)
 
 Output TextGrid tiers
 ---------------------
   Words     — one interval per word with a separate score line
   Phonemes  — MFA phone intervals (IPA symbols)
-
-Notes on long audio
--------------------
-Both models handle arbitrary-length audio:
-  • Whisper uses the Transformers pipeline with chunk_length_s=30 + stride.
-  • Parakeet uses NeMo's local-attention mode and falls back to explicit
-    60-second overlapping chunks for files > 600 s.
 """
 
 from __future__ import annotations
@@ -93,37 +83,42 @@ def main() -> None:
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    # ASR source — either run a model or load a pre-saved JSON
     src = ap.add_mutually_exclusive_group()
     src.add_argument("--model", choices=["whisper_asr", "parakeet"],
-                     help="ASR model to run (step 1).")
+                     help="ASR model to run.")
     src.add_argument("--from-json", type=Path, metavar="JSON",
-                     help="Skip ASR; load this JSON result file and run MFA + TextGrid (step 2).")
+                     help="Skip ASR; load this JSON and run MFA + TextGrid.")
 
     ap.add_argument("--audio", required=True, type=Path,
                     help="Input audio file.")
-    ap.add_argument("--output", required=True, type=Path,
-                    help="Output TextGrid path.")
+    ap.add_argument("--output", type=Path, default=None,
+                    help="Output TextGrid path. Omit in step 1 to skip the words-only TextGrid.")
     ap.add_argument("--no-mfa", action="store_true",
-                    help="Skip MFA forced alignment (Phonemes tier will be empty).")
+                    help="Skip MFA forced alignment (requires --output).")
     ap.add_argument("--dictionary", default="english_us_arpa",
                     help="MFA dictionary name or path (default: english_us_arpa).")
     ap.add_argument("--acoustic-model", default="english_us_arpa", dest="acoustic_model",
                     help="MFA acoustic model name or path (default: english_us_arpa).")
-    ap.add_argument("--json", action="store_true",
-                    help="Also save raw ASR result as <output>.json.")
+    ap.add_argument("--json", type=Path, default=None, metavar="PATH",
+                    help="Save raw ASR result as JSON at this path.")
     ap.add_argument("--checkpoint", default=None,
                     help="Override the default model checkpoint (Whisper only).")
     args = ap.parse_args()
 
     if args.model is None and args.from_json is None:
         ap.error("Provide either --model or --from-json.")
+    if args.from_json and args.output is None:
+        ap.error("--from-json requires --output.")
+    if args.no_mfa and args.output is None:
+        ap.error("--no-mfa requires --output.")
+    if args.model is None and args.json is None and args.output is None:
+        ap.error("Provide at least --output or --json.")
 
     audio = args.audio.expanduser().resolve()
     if not audio.is_file():
         ap.error(f"Audio file not found: {audio}")
 
-    out_path = args.output.expanduser().resolve()
+    out_path = args.output.expanduser().resolve() if args.output else None
 
     # ------------------------------------------------------------------ #
     #  Stage 1 — ASR  (skipped when --from-json is given)                 #
@@ -140,7 +135,6 @@ def main() -> None:
     else:
         print(f"\n[glistener] Model  : {args.model}")
         print(f"[glistener] Audio  : {audio}")
-        print(f"[glistener] Output : {out_path}\n")
 
         model = _load_model(args.model, args.checkpoint)
         print("[glistener] Transcribing…")
@@ -155,7 +149,8 @@ def main() -> None:
     # ------------------------------------------------------------------ #
     #  Stage 2 — MFA phoneme alignment                                     #
     # ------------------------------------------------------------------ #
-    if not args.no_mfa:
+    run_mfa_flag = args.from_json is not None or (not args.no_mfa and out_path is not None)
+    if run_mfa_flag:
         print("[glistener] Running MFA alignment…")
         try:
             from glistener.aligner import run_mfa
@@ -169,25 +164,27 @@ def main() -> None:
         )
         n_phones = len(result.get("phoneme_chars_mfa_flat", []))
         print(f"[glistener] MFA done: {n_phones} phone interval(s).")
-    else:
-        print("[glistener] Skipping MFA (--no-mfa).")
 
     # ------------------------------------------------------------------ #
-    #  Stage 3 — TextGrid                                                  #
+    #  Stage 3 — JSON                                                      #
     # ------------------------------------------------------------------ #
-    print("[glistener] Writing TextGrid…")
-    try:
-        from glistener.textgrid_writer import write_textgrid
-    except ImportError:
-        from textgrid_writer import write_textgrid
-    write_textgrid(result, out_path)
-
     if args.json:
-        json_path = out_path.with_suffix(".json")
-        json_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(json_path, "w", encoding="utf-8") as f:
+        json_out = args.json.expanduser().resolve()
+        json_out.parent.mkdir(parents=True, exist_ok=True)
+        with open(json_out, "w", encoding="utf-8") as f:
             json.dump(result, f, indent=2, ensure_ascii=False)
-        print(f"[glistener] JSON saved → {json_path}")
+        print(f"[glistener] JSON saved → {json_out}")
+
+    # ------------------------------------------------------------------ #
+    #  Stage 4 — TextGrid                                                  #
+    # ------------------------------------------------------------------ #
+    if out_path:
+        print("[glistener] Writing TextGrid…")
+        try:
+            from glistener.textgrid_writer import write_textgrid
+        except ImportError:
+            from textgrid_writer import write_textgrid
+        write_textgrid(result, out_path)
 
     print("\n[glistener] Done.")
 

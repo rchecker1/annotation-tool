@@ -15,11 +15,10 @@ JSON="frontend-reactjs/public/${NAME}.json"
 echo "[run_whisper] Step 1: transcribing with WhisperX…"
 conda run -n whisperx python asr/transcribe.py \
     --model whisper_asr \
-    --audio  "$AUDIO" \
-    --output "$OUTPUT" \
-    --no-mfa --json
+    --audio "$AUDIO" \
+    --json  "$JSON"
 
-echo "[run_whisper] Step 2: MFA alignment…"
+echo "[run_whisper] Step 2: MFA alignment + TextGrid…"
 conda run -n aligner python asr/transcribe.py \
     --from-json "$JSON" \
     --audio     "$AUDIO" \
