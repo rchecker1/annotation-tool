@@ -595,6 +595,8 @@ export default function App() {
   const [selectedTierIds, setSelectedTierIds] = useState(new Set()); // tier border highlight
   const [showExportPopover, setShowExportPopover] = useState(false);
   const [saveState, setSaveState] = useState(null); // null | 'saving' | 'saved' | 'error'
+  const [isDirty, setIsDirty]     = useState(false);
+  const savedTextGridRef          = useRef(null);   // serialized baseline after load or save
   const saveTimerRef = useRef(null);
   const MFA_SERVER = 'http://localhost:5050';
   const mfaQueueRef = useRef([]);
@@ -714,6 +716,7 @@ export default function App() {
       customTiers: customTiersRef.current.map(t => ({ ...t, items: t.items.map(i => ({ ...i })) })),
     });
     if (undoStackRef.current.length > 100) undoStackRef.current.shift();
+    setIsDirty(true);
   }, []);
 
   const popUndo = useCallback(() => {
@@ -725,6 +728,8 @@ export default function App() {
     setWords([...snap.words]);
     setPhones([...snap.phones]);
     setCustomTiers([...(snap.customTiers || [])]);
+    const current = serializeTextGrid(durationRef.current, snap.words, snap.phones, snap.customTiers || []);
+    setIsDirty(current !== savedTextGridRef.current);
   }, []);
 
   // ── Draw helpers ──────────────────────────────────────────────────────
@@ -1463,6 +1468,8 @@ export default function App() {
     setCustomTiers([...extraTiers]);
 
     viewRef.current = { t0: 0, t1: Math.min(dur, 20) };
+    savedTextGridRef.current = serializeTextGrid(dur, w, p, extraTiers);
+    setIsDirty(false);
     redraw();
   }, [redraw]);
 
@@ -1492,6 +1499,8 @@ export default function App() {
       });
       const json = await res.json();
       if (!json.ok) throw new Error(json.error || 'Save failed');
+      savedTextGridRef.current = content;
+      setIsDirty(false);
       setSaveState('saved');
     } catch (e) {
       console.error('Save failed:', e);
@@ -2737,6 +2746,9 @@ export default function App() {
       <div className="toolbar">
         <div className="logo">
           Gwilliams-Praat Aligner{audioFileName && <span>{audioFileName}</span>}
+          {isDirty && !saveState && (
+            <span className="save-indicator save-indicator--unsaved">● Unsaved</span>
+          )}
           {saveState && (
             <span className={`save-indicator save-indicator--${saveState}`}>
               {saveState === 'saving' ? '⟳ Saving…' : saveState === 'saved' ? '✓ Saved' : '✕ Save failed'}

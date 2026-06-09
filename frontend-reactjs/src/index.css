@@ -41,9 +41,10 @@ html, body {
   font-family: var(--mono); padding: 2px 7px; border-radius: 4px;
   animation: save-fadein 80ms ease;
 }
-.save-indicator--saving { color: #7aacf0; background: rgba(58,123,213,0.15); }
-.save-indicator--saved  { color: #60c880; background: rgba(60,200,100,0.15); }
-.save-indicator--error  { color: #f07070; background: rgba(220,80,80,0.15); }
+.save-indicator--unsaved { color: #c8a040; background: rgba(200,160,40,0.15); }
+.save-indicator--saving  { color: #7aacf0; background: rgba(58,123,213,0.15); }
+.save-indicator--saved   { color: #60c880; background: rgba(60,200,100,0.15); }
+.save-indicator--error   { color: #f07070; background: rgba(220,80,80,0.15); }
 @keyframes save-fadein { from { opacity: 0; } to { opacity: 1; } }
 .spacer { flex: 1; }
 .transport { display: flex; align-items: center; gap: 6px; }
