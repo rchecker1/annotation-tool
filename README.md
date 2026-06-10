@@ -1,18 +1,32 @@
 # Annotation Tool
 
-A browser-based audio annotation viewer and editor for Praat TextGrid files.
+A browser-based audio annotation viewer and editor for Praat TextGrid files. This repository also contains code to perform a first-pass automatic speech transcription on an audio file of your choosing.
 
-The full workflow is:
-1. **Automatic Audio Transcription** (`asr/`) — transcribe words and phonemes from audio to generate an initial TextGrid
-2. **View and Edit Annotation** (`frontend-reactjs/`) — review, correct, and export the annotations from TextGrid
+There are two main components in this repository:
+  - **Automatic Audio Transcription** (`asr/`) — transcribe words and phonemes from audio to generate an initial TextGrid
+  - **View and Edit Annotation** (`frontend-reactjs/`) — review, correct, and export the annotations from an existing TextGrid
 
-Table of Contents:
-1. [Initial Setup](initial-setup)
-2. [Audio Transcription](audio-transcription)
-3. [Running the Annotation Viewer](running-the-annotation-viewer)
-4. [Tips and Tricks for Annotation](tips-and-tricks-for-annotating)
-5. [Demo](demo)
-6. [File Structure](file-structure)
+## Documentation
+
+The documentation is split across four files:
+
+**This README** — setup and overview for the annotation viewer
+- [Initial Setup](#initial-setup)
+- [Demo](#demo)
+- [File Structure](#file-structure)
+
+**[TRANSCRIPTION.md](TRANSCRIPTION.md)** — generating an initial TextGrid from audio
+- [Audio Transcription](TRANSCRIPTION.md#audio-transcription)
+
+**[USAGE.md](USAGE.md)** — a guide to running the annotation viewer
+- [Running the Annotation Viewer](USAGE.md#running-the-annotation-viewer)
+- [Tips and Tricks for Annotating](USAGE.md#tips-and-tricks-for-annotating)
+- [Keyboard shortcuts — quick reference](USAGE.md#keyboard-shortcuts--quick-reference)
+
+**[ADVANCED.md](ADVANCED.md)** — advanced audio features
+- [Spectrogram & formants](ADVANCED.md#spectrogram--formants)
+- [Confidence scores](ADVANCED.md#confidence-scores)
+- [In-browser MFA re-alignment](ADVANCED.md#in-browser-mfa-re-alignment)
 
 ## Initial Setup
 
@@ -28,7 +42,7 @@ Requirements:
   # then in a new terminal:
   nvm install 20 && nvm use 20
   ```
-<!-- <video src="https://github.com/user-attachments/assets/3cd4f80c-0bf1-4f35-bc85-58285864d78a" controls width="100%"></video> -->
+<video src="https://github.com/user-attachments/assets/3cd4f80c-0bf1-4f35-bc85-58285864d78a" controls width="100%"></video>
 
 Setup:
 - From the `annotation-tool/` directory, run:
@@ -43,227 +57,6 @@ This creates the necessary conda environments (`aligner`, `whisperx`, and `nemo`
 - WhisperX on Mac will use CPU or MPS (Apple Silicon) for inference.
 
 <video src="https://github.com/user-attachments/assets/95f06d80-a8f9-44ae-863f-acd5c6cb02d6" controls width="100%"></video>
-
----
-
-## Audio Transcription
-
-To perform automatic transcription on your own audio file, run from the `annotation-tool/` directory:
-
-```bash
-bash asr/run_whisper.sh /path/to/your/audio.wav [output_filename] # output_filename is optional
-```
-
-This handles everything — word and phoneme transcription and alignment. If you specify an output file name, the resulting TextGrid will be saved to `frontend-reactjs/public/output_filename.TextGrid` otherwise the default filename is `output_whisper.TextGrid`.
-
-**Changing the Whisper model size** — by default WhisperX uses `tiny.en` (fast, less accurate). To use a larger model, edit line 32 of `asr/models/whisper_asr.py`:
-
-```python
-_CHECKPOINT = "tiny.en"   # change to e.g. "base.en", "small.en", "large-v3-turbo"
-```
-
-Larger models are more accurate but slower. See the [WhisperX docs](https://github.com/m-bain/whisperX) for all available checkpoints.
-
-<!-- <video src="https://github.com/user-attachments/assets/1f9cb5c7-2829-4bd2-9c47-d2ca2fb4b183" controls width="100%"></video> -->
-
----
-
-## Running the Annotation Viewer
-
-Copy your audio and TextGrid into the frontend's `public/` folder:
-
-```
-frontend-reactjs/public/audio.wav
-frontend-reactjs/public/output_whisper.TextGrid
-```
-
-To start the annotation viewer server:
-
-```bash
-cd frontend-reactjs
-npm run dev
-```
-
-Open **http://localhost:5173** — the audio and TextGrid load automatically.
-
-**Multiple files:** if `public/` contains more than one `.wav` or `.TextGrid`, a picker modal appears on startup letting you choose which pair to open.
-
-You can also load files at any time without restarting:
-- Click **📄 Load TextGrid** in the toolbar to load a new TextGrid
-- **Drag and drop** a `.wav` or `.TextGrid` file anywhere on the page
-
-<video src="https://github.com/user-attachments/assets/642f285d-c20b-4bd4-8114-e0bb2c3ec80d" controls width="100%"></video>
-
----
-
-## Tips and Tricks for Annotating
-
-### Navigation
-
-| Action | How |
-|---|---|
-| Play / Pause | `Space` or ▶ Play button |
-| Loop playback | `L` or ↺ Loop button |
-| Playback speed | 0.25×–2× dropdown in toolbar |
-| Zoom in/out | Scroll wheel, or zoom slider in toolbar |
-| Zoom at cursor | `Ctrl/Cmd + scroll` |
-| Pan left/right | Horizontal scroll, Arrow keys (20% of view), or drag the minimap |
-| Fit full audio | `F` |
-| Reset to start | `Home` |
-| Seek | Click anywhere on the waveform, spectrogram, or ruler |
-| Select tile | Click any tile (edit mode not required) — moves playhead to onset and sets play region |
-| Play tile | After selecting a tile, press `Space` or ▶ Play |
-| Auto-play tile | Enable AUTO-PLAY in the SHOW bar — clicking a tile starts playback immediately |
-
-### Tiers
-
-The annotation area shows stacked tiers below the waveform and spectrogram:
-
-- **WRD** — word-level annotations (blue tiles). Tiles are colored by confidence score if present: red (low) → yellow → green (high).
-- **PHN** — phoneme-level annotations (green tiles). Includes an IPA virtual keyboard when renaming.
-- **Custom tiers** — any additional tiers loaded from the TextGrid, or created with the **+ Add Tier** button.
-
-Use the **SHOW** checkbox bar at the top of the tier area to hide/show individual tiers. Tiers can be resized by dragging the dividers between them. The **AUTO-PLAY** checkbox (right side of the SHOW bar) makes clicking any tile immediately play its audio without needing to press Play.
-
-### Edit mode
-
-Press **`1`** (default, configurable) or click the **✎ Edit** button to enter edit mode. The button shows the current shortcut key on its right side — click that side to rebind it to any key.
-
-In edit mode, a hint bar appears at the bottom of the tier area showing all available shortcuts.
-
-**Single tile operations:**
-- **Click a tile** — select it; moves the playhead to its onset and sets the play region to onset→offset
-- **Drag a boundary** — hover near a tile edge (yellow highlight appears), then drag left/right; snaps to nearby boundaries in other tiers. Hold **Alt** to disable snapping
-- **Drag a tile body** — drag the centre of a tile to shift it in time; snaps to nearby boundaries in other tiers
-- **Double-click a tile** — open the inline label editor; phoneme tiles show an IPA virtual keyboard
-- **Double-click empty space** — create a new annotation tile at that position
-- **Right-click a tile** — context menu: Rename / Merge with next / Delete
-- **`⌫` / Delete key** — delete the selected tile(s)
-
-**Multi-tile operations:**
-- **`Ctrl/Cmd + click`** tiles — add or remove tiles from a multi-selection (works across WRD, PHN, and custom tiers simultaneously)
-- **Drag any tile in the group** — moves all selected tiles together by the same amount; clamped so no tile goes outside the file bounds
-- **Click a grouped tile without dragging** — collapses selection back to just that tile
-- **`⌫` / Delete key** — deletes all selected tiles across all tiers in one undoable operation
-
-**Undo:** `Ctrl/Cmd+Z` — steps back through all edit operations (max 100 steps).
-
-### Saving
-
-**`Ctrl/Cmd+S`** saves the current state of all tiers directly back to the `.TextGrid` file in `public/`, overwriting it in place. A status indicator appears in the toolbar:
-- `⟳ Saving…` — write in progress
-- `✓ Saved` — successfully written to disk
-- `✕ Save failed` — check that `npm run dev` is running (save requires the dev server)
-
-> Note: `Ctrl/Cmd+S` only works during development (`npm run dev`). For production builds, use the Export button instead.
-
-### Exporting
-
-Click **↓ Export** to download the annotations as a file. Two format options:
-
-- **Full export** — includes all tiers (WRD + PHN + custom) and confidence scores; best for reloading into this tool
-- **Praat compatible** — standard TextGrid format with WRD + PHN + any custom tiers, loadable in Praat (confidence score fields are omitted)
-
----
-
-## Spectrogram & formants
-
-Controls appear stacked on the right side of the spectrogram tier:
-
-- **Colormap selector** — switch between `jet`, `inferno`, `viridis`, and `greys`.
-- **Enhance Spectrogram** — recomputes the spectrogram for the current view using Python/librosa at full canvas resolution. Click **⚙** to expand settings:
-  - **Mel bands** — 40 / 80 / 128 / 160 (default 128)
-  - **FFT size** — 256 / 512 / 1024 / 2048 (default 512)
-- **Generate Formants** — overlays F1/F2/F3 formant tracks computed by Praat's Burg algorithm (via `parselmouth`). Includes an on/off pill toggle to show or hide the overlay without recomputing.
-
-> **Note:** Enhance Spectrogram and Generate Formants require the `aligner` conda environment to be present (it is created by `setup.sh`). The Vite dev server (`npm run dev`) shells out to `dsp_server.py` in the `aligner` env for these features. They are not available in production builds.
-
-**Long audio (> 10 min):** the base spectrogram is not computed on load to avoid blocking the browser. The spectrogram area shows a placeholder — click **Enhance Spectrogram** to generate it for the current view. For audio over 30 minutes, a warning banner appears reminding you to save frequently (`Ctrl/Cmd+S`), as the browser holds the full decoded audio in memory.
-
----
-
-## Confidence scores
-
-Word tiles are color-coded by the confidence score from Whisper:
-- **Red** — low confidence (score near 0)
-- **Yellow** — medium confidence (score near 0.5)
-- **Green** — high confidence (score near 1.0)
-
-Click **◎ Scores** in the toolbar to open the Confidence Dashboard, which shows:
-- Mean, median, min, max scores
-- 10-bin histogram
-- Color legend
-- 5 lowest-confidence words
-
----
-
-## In-browser MFA re-alignment
-
-The **⚙ Run MFA** button re-runs forced phoneme alignment on a selected region without leaving the browser. It requires the MFA Flask server running alongside the frontend.
-
-Start the server **in a separate terminal** before using this feature:
-
-```bash
-conda activate aligner
-python mfa_server.py
-```
-
-You should see:
-```
-INFO  MFA server starting on http://localhost:5050
-INFO    Acoustic model : english_us_arpa
-INFO    Dictionary     : english_us_arpa
-```
-
-The server loads the alignment model once (~16 s startup), then handles each request in 1–4 s.
-
-**To use it:**
-1. Click **⚙ Run MFA** — if multiple words overlap the selection you'll be asked to confirm which to align
-2. When the job completes, phone boundaries are merged into the PHN tier
-
-Up to 4 alignment jobs can be queued at once. A dropdown badge on the button shows queue status. If a word is out-of-vocabulary, the server automatically substitutes the closest dictionary match and shows an orange warning toast.
-
-**Common errors:**
-
-| Error | Fix |
-|---|---|
-| Server not reachable | Start `mfa_server.py` and confirm startup message |
-| Word not in dictionary | Edit the label to a known spelling; OOV words are auto-substituted |
-| Audio too short | Selected region is under ~50 ms |
-| MFA alignment failed | Check the terminal running `mfa_server.py` |
-
-To use a different language:
-```bash
-MFA_ACOUSTIC_MODEL=french_mfa MFA_DICTIONARY=french_mfa python mfa_server.py
-```
-
----
-
-## Keyboard shortcuts — quick reference
-
-| Key | Action |
-|---|---|
-| `Space` | Play / Pause |
-| `L` | Toggle loop |
-| `F` | Fit full audio in view |
-| `Home` | Reset view to first 20 s |
-| `1` *(configurable)* | Toggle edit mode |
-| `Ctrl/Cmd+S` | Save TextGrid to disk (dev only) |
-| `Ctrl/Cmd+Z` | Undo |
-| `⌫` / `Delete` | Delete selected tile(s) (edit mode) |
-| `Ctrl/Cmd+click` | Add/remove tile from multi-selection (edit mode) |
-| `←` / `→` | Pan view by 20% |
-
-The edit mode shortcut can be changed by clicking the key badge on the right side of the Edit button and pressing any key.
-
----
-
-## Demo
-- **Key Reminder**: you can press "1" to edit instead of manually clicking the edit button. That shortcut key can also be remapped to any other button:
-  
-  <img width="358" height="73" alt="image" src="https://github.com/user-attachments/assets/4ec3a556-5837-443e-9292-e9de6ed5cfbd" />
-
-<video src="https://github.com/user-attachments/assets/a6242a2a-df1b-4089-88d7-ecdb3a090055" controls width="100%"></video>
 
 ---
 
@@ -293,3 +86,9 @@ code/
     └── src/
         └── App.jsx           — main application
 ```
+
+---
+
+## Demo
+
+<video src="https://github.com/user-attachments/assets/a6242a2a-df1b-4089-88d7-ecdb3a090055" controls width="100%"></video>
