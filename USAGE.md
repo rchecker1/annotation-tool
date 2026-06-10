@@ -4,7 +4,7 @@ How to run the annotation viewer and work efficiently while annotating.
 
 [← Back to README](README.md) · [Transcription →](TRANSCRIPTION.md) · [Advanced features →](ADVANCED.md)
 
-## Running the Annotation Viewer
+---
 
 Copy your audio and TextGrid into the frontend's `public/` folder:
 
