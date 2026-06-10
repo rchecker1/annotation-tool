@@ -60,6 +60,12 @@ This creates the necessary conda environments (`aligner`, `whisperx`, and `nemo`
 
 ---
 
+## Demo
+What you should see once the tool is all set up:
+<video src="https://github.com/user-attachments/assets/a6242a2a-df1b-4089-88d7-ecdb3a090055" controls width="100%"></video>
+
+---
+
 ## File structure
 
 ```
@@ -87,8 +93,4 @@ code/
         └── App.jsx           — main application
 ```
 
----
 
-## Demo
-
-<video src="https://github.com/user-attachments/assets/a6242a2a-df1b-4089-88d7-ecdb3a090055" controls width="100%"></video>
