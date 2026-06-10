@@ -3,21 +3,20 @@
 A browser-based audio annotation viewer and editor for Praat TextGrid files.
 
 The full workflow is:
-1. **ASR + forced alignment** (`asr/`) — transcribe audio and generate an initial TextGrid
-2. **Annotation tool** (`frontend-reactjs/`) — review, correct, and export the annotations
+1. **Automatic Audio Transcription** (`asr/`) — transcribe words and phonemes from audio to generate an initial TextGrid
+2. **View and Edit Annotation** (`frontend-reactjs/`) — review, correct, and export the annotations from TextGrid
 
----
+Table of Contents:
+1. [Initial Setup](initial-setup)
+2. [Audio Transcription](audio-transcription)
+3. [Running the Annotation Viewer](running-the-annotation-viewer)
+4. [Tips and Tricks for Annotation](tips-and-tricks-for-annotating)
+5. [Demo](demo)
+6. [File Structure](file-structure)
 
-## Demo
-- **Key Reminder**: you can press "1" to edit instead of manually clicking the edit button. That shortcut key can also be remapped to any other button:
-  
-  <img width="358" height="73" alt="image" src="https://github.com/user-attachments/assets/4ec3a556-5837-443e-9292-e9de6ed5cfbd" />
+## Initial Setup
 
-<video src="https://github.com/user-attachments/assets/a6242a2a-df1b-4089-88d7-ecdb3a090055" controls width="100%"></video>
-
----
-## Prerequisites
-
+Requirements:
 - **conda** — [Miniconda](https://docs.conda.io/en/latest/miniconda.html) or Anaconda
 - **Node.js v18+** — on macOS, easiest via [Homebrew](https://brew.sh):
   ```bash
@@ -29,18 +28,13 @@ The full workflow is:
   # then in a new terminal:
   nvm install 20 && nvm use 20
   ```
-<video src="https://github.com/user-attachments/assets/3cd4f80c-0bf1-4f35-bc85-58285864d78a" controls width="100%"></video>
+<!-- <video src="https://github.com/user-attachments/assets/3cd4f80c-0bf1-4f35-bc85-58285864d78a" controls width="100%"></video> -->
 
----
-
-## One-time setup
-
-From the `annotation-tool/` directory, run:
-
-```bash
-bash setup.sh
-```
-
+Setup:
+- From the `annotation-tool/` directory, run:
+  ```bash
+  bash setup.sh
+  ```
 This creates the necessary conda environments (`aligner`, `whisperx`, and `nemo` on Linux), downloads the MFA English models, and installs the frontend Node dependencies.
 
 **macOS Note:**
@@ -52,22 +46,15 @@ This creates the necessary conda environments (`aligner`, `whisperx`, and `nemo`
 
 ---
 
-## Transcribing your own audio
+## Audio Transcription
 
-To generate a TextGrid from your own audio file, run from the `annotation-tool/` directory:
-
-```bash
-bash asr/run_whisper.sh /path/to/your/audio.wav
-```
-
-This handles everything — transcription and phoneme alignment — and writes the result to `frontend-reactjs/public/output_whisper.TextGrid`, ready to load.
-
-To use a custom output name:
+To perform automatic transcription on your own audio file, run from the `annotation-tool/` directory:
 
 ```bash
-bash asr/run_whisper.sh /path/to/your/audio.wav my_output
-# writes: frontend-reactjs/public/my_output.TextGrid
+bash asr/run_whisper.sh /path/to/your/audio.wav [output_filename] # output_filename is optional
 ```
+
+This handles everything — word and phoneme transcription and alignment. If you specify an output file name, the resulting TextGrid will be saved to `frontend-reactjs/public/output_filename.TextGrid` otherwise the default filename is `output_whisper.TextGrid`.
 
 **Changing the Whisper model size** — by default WhisperX uses `tiny.en` (fast, less accurate). To use a larger model, edit line 32 of `asr/models/whisper_asr.py`:
 
@@ -77,11 +64,11 @@ _CHECKPOINT = "tiny.en"   # change to e.g. "base.en", "small.en", "large-v3-turb
 
 Larger models are more accurate but slower. See the [WhisperX docs](https://github.com/m-bain/whisperX) for all available checkpoints.
 
-<video src="https://github.com/user-attachments/assets/1f9cb5c7-2829-4bd2-9c47-d2ca2fb4b183" controls width="100%"></video>
+<!-- <video src="https://github.com/user-attachments/assets/1f9cb5c7-2829-4bd2-9c47-d2ca2fb4b183" controls width="100%"></video> -->
 
 ---
 
-## Loading files
+## Running the Annotation Viewer
 
 Copy your audio and TextGrid into the frontend's `public/` folder:
 
@@ -90,7 +77,7 @@ frontend-reactjs/public/audio.wav
 frontend-reactjs/public/output_whisper.TextGrid
 ```
 
-Then start the dev server:
+To start the annotation viewer server:
 
 ```bash
 cd frontend-reactjs
@@ -109,7 +96,7 @@ You can also load files at any time without restarting:
 
 ---
 
-## Annotating
+## Tips and Tricks for Annotating
 
 ### Navigation
 
@@ -268,6 +255,15 @@ MFA_ACOUSTIC_MODEL=french_mfa MFA_DICTIONARY=french_mfa python mfa_server.py
 | `←` / `→` | Pan view by 20% |
 
 The edit mode shortcut can be changed by clicking the key badge on the right side of the Edit button and pressing any key.
+
+---
+
+## Demo
+- **Key Reminder**: you can press "1" to edit instead of manually clicking the edit button. That shortcut key can also be remapped to any other button:
+  
+  <img width="358" height="73" alt="image" src="https://github.com/user-attachments/assets/4ec3a556-5837-443e-9292-e9de6ed5cfbd" />
+
+<video src="https://github.com/user-attachments/assets/a6242a2a-df1b-4089-88d7-ecdb3a090055" controls width="100%"></video>
 
 ---
 
