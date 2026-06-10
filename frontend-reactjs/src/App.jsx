@@ -904,6 +904,11 @@ export default function App() {
       const ft = formantTrackRef.current;
       if (ft) {
         const FMAX = Math.min(8000, ft.sr / 2);
+        const hzToMelY = (hz) => {
+          const melHz  = 2595 * Math.log10(1 + hz   / 700);
+          const melMax = 2595 * Math.log10(1 + FMAX  / 700);
+          return h - (melHz / melMax) * h;
+        };
         const colors = ['rgba(255,80,80,0.85)', 'rgba(80,220,80,0.85)', 'rgba(80,140,255,0.85)'];
         // Support both Praat times[] and legacy hop/frames formats
         const useTimes = Array.isArray(ft.times) && ft.times.length > 0;
@@ -931,7 +936,7 @@ export default function App() {
             }
             const hz = fdata[fr];
             if (!hz) { started = false; continue; }
-            const fy = h - (hz / FMAX) * h;
+            const fy = hzToMelY(hz);
             if (!started) { ctx.moveTo(cx, fy); started = true; } else ctx.lineTo(cx, fy);
           }
           ctx.stroke();
@@ -942,11 +947,13 @@ export default function App() {
     const labelColor = { jet: '#000000', inferno: '#ffffff', viridis: '#ffffff', greys: '#000000' }[colormapNameRef.current] ?? '#ffffff';
     const shadowColor = { jet: '#ffffff', inferno: '#000000', viridis: '#000020', greys: '#ffffff' }[colormapNameRef.current] ?? '#000000';
     const FMAX = 8000;
+    const melMax = 2595 * Math.log10(1 + FMAX / 700);
     const ticks = [100, 200, 500, 1000, 2000, 4000, 8000];
     ctx.font = "9px 'JetBrains Mono',monospace";
     ctx.textAlign = 'left';
     for (const hz of ticks) {
-      const y = Math.round(h - (hz / FMAX) * h) + 0.5;
+      const melHz = 2595 * Math.log10(1 + hz / 700);
+      const y = Math.round(h - (melHz / melMax) * h) + 0.5;
       ctx.strokeStyle = 'rgba(255,255,255,0.08)';
       ctx.lineWidth = 1;
       ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
