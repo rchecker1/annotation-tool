@@ -688,10 +688,10 @@ export default function App() {
       const marked = updated.map(it => {
         const prev = prevById.get(it.id);
         // Already edited, newly created, or changed → mark edited
-        if (prev?.edited) return { ...it, edited: true };
-        if (!prev) return { ...it, edited: true };
+        if (prev?.edited) return { ...it, edited: true, score: 1 };
+        if (!prev) return { ...it, edited: true, score: 1 };
         if (prev.text !== it.text || prev.t0 !== it.t0 || prev.t1 !== it.t1) {
-          return { ...it, edited: true };
+          return { ...it, edited: true, score: 1 };
         }
         return it;
       });
