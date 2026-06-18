@@ -655,6 +655,8 @@ export default function App() {
   const editModeRef      = useRef(true);
   const undoStackRef     = useRef([]); // snapshots: { words, phones, customTiers }
   const redoStackRef = useRef([]); //snapshot for redo
+  const [undoCount, setUndoCount] = useState(0);
+  const [redoCount, setRedoCount] = useState(0);
   const hoverEdgeRef     = useRef(null); // { id, tierId, side: 'left'|'right' } for cursor feedback
   const selectedTilesRef = useRef(new Map()); // id → { id, tierId } — multi-selected tiles in edit mode
   const selectionAnchorRef = useRef(null);
@@ -723,6 +725,28 @@ export default function App() {
   }, []);
 
   // ── Undo ──────────────────────────────────────────────────────────────
+  // const pushUndo = useCallback(() => {
+  //   undoStackRef.current.push({
+  //     words:  wordsRef.current.map(it => ({ ...it })),
+  //     phones: phonesRef.current.map(it => ({ ...it })),
+  //     customTiers: customTiersRef.current.map(t => ({ ...t, items: t.items.map(i => ({ ...i })) })),
+  //   });
+  //   if (undoStackRef.current.length > 100) undoStackRef.current.shift();
+  //   setIsDirty(true);
+  // }, []);
+
+  // const popUndo = useCallback(() => {
+  //   const snap = undoStackRef.current.pop();
+  //   if (!snap) return;
+  //   wordsRef.current  = snap.words;
+  //   phonesRef.current = snap.phones;
+  //   customTiersRef.current = snap.customTiers || [];
+  //   setWords([...snap.words]);
+  //   setPhones([...snap.phones]);
+  //   setCustomTiers([...(snap.customTiers || [])]);
+  //   const current = serializeTextGrid(durationRef.current, snap.words, snap.phones, snap.customTiers || []);
+  //   setIsDirty(current !== savedTextGridRef.current);
+  // }, []);
   const pushUndo = useCallback(() => {
     undoStackRef.current.push({
       words:  wordsRef.current.map(it => ({ ...it })),
@@ -730,22 +754,53 @@ export default function App() {
       customTiers: customTiersRef.current.map(t => ({ ...t, items: t.items.map(i => ({ ...i })) })),
     });
     if (undoStackRef.current.length > 100) undoStackRef.current.shift();
+    redoStackRef.current = []; // a new edit invalidates the redo history
+    setUndoCount(undoStackRef.current.length);
+    setRedoCount(0);
     setIsDirty(true);
   }, []);
 
   const popUndo = useCallback(() => {
     const snap = undoStackRef.current.pop();
     if (!snap) return;
+    // save current state to the redo stack before restoring
+    redoStackRef.current.push({
+      words:  wordsRef.current.map(it => ({ ...it })),
+      phones: phonesRef.current.map(it => ({ ...it })),
+      customTiers: customTiersRef.current.map(t => ({ ...t, items: t.items.map(i => ({ ...i })) })),
+    });
     wordsRef.current  = snap.words;
     phonesRef.current = snap.phones;
     customTiersRef.current = snap.customTiers || [];
     setWords([...snap.words]);
     setPhones([...snap.phones]);
     setCustomTiers([...(snap.customTiers || [])]);
+    setUndoCount(undoStackRef.current.length);
+    setRedoCount(redoStackRef.current.length);
     const current = serializeTextGrid(durationRef.current, snap.words, snap.phones, snap.customTiers || []);
     setIsDirty(current !== savedTextGridRef.current);
   }, []);
 
+  const popRedo = useCallback(() => {
+    const snap = redoStackRef.current.pop();
+    if (!snap) return;
+    // save current state to the undo stack before restoring
+    undoStackRef.current.push({
+      words:  wordsRef.current.map(it => ({ ...it })),
+      phones: phonesRef.current.map(it => ({ ...it })),
+      customTiers: customTiersRef.current.map(t => ({ ...t, items: t.items.map(i => ({ ...i })) })),
+    });
+    wordsRef.current  = snap.words;
+    phonesRef.current = snap.phones;
+    customTiersRef.current = snap.customTiers || [];
+    setWords([...snap.words]);
+    setPhones([...snap.phones]);
+    setCustomTiers([...(snap.customTiers || [])]);
+    setUndoCount(undoStackRef.current.length);
+    setRedoCount(redoStackRef.current.length);
+    const current = serializeTextGrid(durationRef.current, snap.words, snap.phones, snap.customTiers || []);
+    setIsDirty(current !== savedTextGridRef.current);
+  }, []);
   // ── Draw helpers ──────────────────────────────────────────────────────
 
   const drawPlayheadLine = useCallback((ctx, w, h) => {
@@ -1636,6 +1691,11 @@ export default function App() {
         popUndo();
         redraw();
       }
+      if ((e.ctrlKey || e.metaKey) && e.code === 'KeyY') {
+        e.preventDefault();
+        popRedo();
+        redraw();
+      }
 
       // ── Edit-mode tile operations ─────────────────────────────────────
       if (editModeRef.current && selectedTilesRef.current.size > 0) {
@@ -2478,6 +2538,7 @@ export default function App() {
   };
 
   // ── Label editor commit ───────────────────────────────────────────────
+  /*
   const commitLabel = useCallback((newText) => {
     const ed = labelEditor;
     if (!ed) return;
@@ -2489,7 +2550,21 @@ export default function App() {
     setLabelEditor(null);
     redraw();
   }, [labelEditor, commitTierItems, redraw]);
-
+  */
+  const commitLabel = useCallback((newText) => {
+    const ed = labelEditor;
+    if (!ed) return;
+    const src = ed.tierId === 'words' ? wordsRef.current
+              : ed.tierId === 'phones' ? phonesRef.current
+              : (customTiersRef.current.find(t => t.id === ed.tierId)?.items ?? []);
+    const current = src.find(it => it.id === ed.id);
+    // Only record an undo snapshot if the text actually changed
+    if (current && current.text !== newText) pushUndo();
+    const updated = src.map(it => it.id === ed.id ? { ...it, text: newText } : it);
+    commitTierItems(ed.tierId, updated);
+    setLabelEditor(null);
+    redraw();
+  }, [labelEditor, commitTierItems, redraw, pushUndo]);
   // ── MFA alignment ─────────────────────────────────────────────────────────
 
   /**
@@ -2978,11 +3053,14 @@ export default function App() {
         >
           undo (ctrl+z)
         </button>
-        <button
-          className = "btn"
-          
+                <button
+          className="btn"
+          onClick={() => { popRedo(); redraw(); }}
+          disabled={redoCount === 0}
+          title="Redo (Ctrl+Y)"
+          style={{ opacity: redoCount === 0 ? 0.4 : 1 }}
         >
-
+          ↪ Redo
         </button>
         {/* ── Export button + filename popover ─────────────────────── */}
         <div style={{ position: 'relative' }}>
