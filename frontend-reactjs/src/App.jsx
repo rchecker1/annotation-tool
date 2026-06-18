@@ -654,8 +654,10 @@ export default function App() {
   const formantTrackRef  = useRef(null);
   const editModeRef      = useRef(true);
   const undoStackRef     = useRef([]); // snapshots: { words, phones, customTiers }
+  const redoStackRef = useRef([]); //snapshot for redo
   const hoverEdgeRef     = useRef(null); // { id, tierId, side: 'left'|'right' } for cursor feedback
   const selectedTilesRef = useRef(new Map()); // id → { id, tierId } — multi-selected tiles in edit mode
+  const selectionAnchorRef = useRef(null);
   const snapGuideRef     = useRef(null); // { t: number } | null — active snap target during edge drag
 
   // ── Canvas element refs ───────────────────────────────────────────────
@@ -1993,7 +1995,30 @@ export default function App() {
 
       const { item, side } = hit;
       const multiKey = e.ctrlKey || e.metaKey;
-
+      if (e.shiftKey) {
+        const anchor = selectionAnchorRef.current;
+        if (anchor && anchor.tierId === tierId) {
+          const sorted = [...items].sort((a, b) => a.t0 - b.t0);
+          const ai = sorted.findIndex(it => it.id === anchor.id);
+          const bi = sorted.findIndex(it => it.id === item.id);
+          if (ai !== -1 && bi !== -1) {
+            const [lo, hi] = ai <= bi ? [ai, bi] : [bi, ai];
+            selectedTilesRef.current.clear();
+            for (let i = lo; i <= hi; i++) {
+              selectedTilesRef.current.set(sorted[i].id, { id: sorted[i].id, tierId });
+            }
+            syncSelectionState();
+            redraw();
+            return;
+          }
+        }
+        selectedTilesRef.current.clear();
+        selectedTilesRef.current.set(item.id, { id: item.id, tierId });
+        selectionAnchorRef.current = { id: item.id, tierId };
+        syncSelectionState();
+        redraw();
+        return;
+      }
       if (multiKey) {
         // Ctrl/Cmd+click — toggle tile in/out of multi-selection, no drag
         if (selectedTilesRef.current.has(item.id)) {
@@ -2001,6 +2026,7 @@ export default function App() {
         } else {
           selectedTilesRef.current.set(item.id, { id: item.id, tierId });
         }
+        selectionAnchorRef.current = { id: item.id, tierId };
         syncSelectionState();
         redraw();
         return;
@@ -2017,6 +2043,7 @@ export default function App() {
         // Not in group — immediately select just this tile
         selectedTilesRef.current.clear();
         selectedTilesRef.current.set(item.id, { id: item.id, tierId });
+        selectionAnchorRef.current = { id: item.id, tierId }
         syncSelectionState();
         selectionRef.current = { t0: item.t0, t1: item.t1 };
         playheadRef.current = item.t0;
@@ -2928,6 +2955,21 @@ export default function App() {
             </div>
           );
         })()}
+        {/*undo button*/}
+        <button
+          className = "btn"
+          onClick={() => { popUndo(); redraw(); }}
+          disabled = {undoStackRef.current.length === 0}
+          title = "undo (ctrl z)"
+        >
+          undo (ctrl+z)
+        </button>
+        <button
+          className = "btn"
+          
+        >
+
+        </button>
         {/* ── Export button + filename popover ─────────────────────── */}
         <div style={{ position: 'relative' }}>
           <button
