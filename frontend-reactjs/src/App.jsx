@@ -353,9 +353,9 @@ function ExportPopover({ defaultName, customTiers, onExport, onClose }) {
       </div>
 
       <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end', marginTop: 2 }}>
-        <button className="btn" onClick={onClose}
+        <button className="btn btn-export" onClick={onClose}
           style={{ padding: '4px 10px', fontSize: 12, background: 'transparent' }}>Cancel</button>
-        <button className="btn" onClick={doExport}
+        <button className="btn btn-export" onClick={doExport}
           style={{ padding: '4px 10px', fontSize: 12 }}>↓ Download</button>
       </div>
     </div>
@@ -660,6 +660,7 @@ export default function App() {
   const hoverEdgeRef     = useRef(null); // { id, tierId, side: 'left'|'right' } for cursor feedback
   const selectedTilesRef = useRef(new Map()); // id → { id, tierId } — multi-selected tiles in edit mode
   const selectionAnchorRef = useRef(null);
+  const labelClipboardRef = useRef(null);
   const snapGuideRef     = useRef(null); // { t: number } | null — active snap target during edge drag
 
   // ── Canvas element refs ───────────────────────────────────────────────
@@ -1696,6 +1697,39 @@ export default function App() {
         popRedo();
         redraw();
       }
+      // Copy the selected tile's label into the in-app clipboard
+      if ((e.ctrlKey || e.metaKey) && e.code === 'KeyC') {
+        if (editModeRef.current && selectedTilesRef.current.size > 0) {
+          const first = selectedTilesRef.current.values().next().value;
+          const items = first.tierId === 'words'  ? wordsRef.current
+                      : first.tierId === 'phones' ? phonesRef.current
+                      : (customTiersRef.current.find(t => t.id === first.tierId)?.items ?? []);
+          const it = items.find(x => x.id === first.id);
+          if (it) labelClipboardRef.current = it.text;
+        }
+        return;
+      }
+      // Paste the clipboard label onto every selected tile
+      if ((e.ctrlKey || e.metaKey) && e.code === 'KeyV') {
+        if (editModeRef.current && selectedTilesRef.current.size > 0 && labelClipboardRef.current != null) {
+          e.preventDefault();
+          pushUndo();
+          const byTier = new Map();
+          for (const [id, entry] of selectedTilesRef.current) {
+            if (!byTier.has(entry.tierId)) byTier.set(entry.tierId, new Set());
+            byTier.get(entry.tierId).add(id);
+          }
+          for (const [tid, idSet] of byTier) {
+            const items = tid === 'words'  ? wordsRef.current
+                        : tid === 'phones' ? phonesRef.current
+                        : (customTiersRef.current.find(t => t.id === tid)?.items ?? []);
+            commitTierItems(tid, items.map(it =>
+              idSet.has(it.id) ? { ...it, text: labelClipboardRef.current } : it));
+          }
+          redraw();
+        }
+        return;
+      }
 
       // ── Edit-mode tile operations ─────────────────────────────────────
       if (editModeRef.current && selectedTilesRef.current.size > 0) {
@@ -2093,6 +2127,7 @@ export default function App() {
         redraw();
         return;
       }
+      /*
       if (multiKey) {
         // Ctrl/Cmd+click — toggle tile in/out of multi-selection, no drag
         if (selectedTilesRef.current.has(item.id)) {
@@ -2103,6 +2138,40 @@ export default function App() {
         selectionAnchorRef.current = { id: item.id, tierId };
         syncSelectionState();
         redraw();
+        return;
+      }
+      */
+
+      if (multiKey) {
+        // ctrl/cmd click or drag tiles for tile selection
+        const sorted = [...items].sort((a, b) => a.t0 - b.t0);
+        const anchor = (selectionAnchorRef.current && selectionAnchorRef.current.tierId === tierId)
+          ? selectionAnchorRef.current
+          : { id: item.id, tierId };
+        const selectRangeTo = (targetId) => {
+          const ai = sorted.findIndex(it => it.id === anchor.id);
+          const bi = sorted.findIndex(it => it.id === targetId);
+          if (ai === -1 || bi === -1) return;
+          const [lo, hi] = ai <= bi ? [ai, bi] : [bi, ai];
+          selectedTilesRef.current.clear();
+          for (let i = lo; i <= hi; i++) {
+            selectedTilesRef.current.set(sorted[i].id, { id: sorted[i].id, tierId });
+          }
+          syncSelectionState();
+          redraw();
+        };
+        selectRangeTo(item.id);
+        const onMove = (ev) => {
+          const hit = hitTest(canvas, itemsRef.current, ev.clientX, ev.clientY);
+          if (hit) selectRangeTo(hit.item.id);
+        };
+        const onUp = () => {
+          window.removeEventListener('mousemove', onMove);
+          window.removeEventListener('mouseup', onUp);
+        };
+        selectionAnchorRef.current = anchor;
+        window.addEventListener('mousemove', onMove);
+        window.addEventListener('mouseup', onUp);
         return;
       }
 
@@ -3060,12 +3129,13 @@ export default function App() {
           title="Redo (Ctrl+Y)"
           style={{ opacity: redoCount === 0 ? 0.4 : 1 }}
         >
-          ↪ Redo
+          redo
+          (ctrl + y)
         </button>
         {/* ── Export button + filename popover ─────────────────────── */}
         <div style={{ position: 'relative' }}>
           <button
-            className="btn"
+            className="btn btn-export"
             onClick={() => setShowExportPopover(v => !v)}
             title="Export TextGrid"
           >
@@ -3083,7 +3153,7 @@ export default function App() {
         {/* ── Add Tier button + inline popover ─────────────────────── */}
         <div style={{ position: 'relative' }}>
           <button
-            className="btn"
+            className="btn btn-tier"
             onClick={() => setShowTierManager(v => !v)}
             title="Add a custom tier"
           >
