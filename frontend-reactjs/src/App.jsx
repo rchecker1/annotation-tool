@@ -1659,6 +1659,16 @@ export default function App() {
     ro.observe(el);
     return () => { ro.disconnect(); if (raf) cancelAnimationFrame(raf); };
   }, [redraw]);
+  // Warn before closing/refreshing when there are unsaved changes
+  useEffect(() => {
+    const handler = (e) => {
+      if (!isDirty) return;
+      e.preventDefault();
+      e.returnValue = '';
+    };
+    window.addEventListener('beforeunload', handler);
+    return () => window.removeEventListener('beforeunload', handler);
+  }, [isDirty]);
 
   // Keyboard shortcuts
   useEffect(() => {
