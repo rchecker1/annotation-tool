@@ -19,12 +19,10 @@ Prerequisites (one-time):
 
 from __future__ import annotations
 
-import os
-import re
 import string
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List
 
 import numpy as np
 
@@ -92,7 +90,7 @@ def _get_aligner(acoustic_model: str, dictionary: str):
     print(f'[MFA] Loading models (one-time, ~15 s) …')
     t0 = time.time()
 
-    model = AcousticModel(str(acoustic_path))
+    model = AcousticModel(acoustic_path)
     p = model.parameters
 
     lc = LexiconCompiler(
